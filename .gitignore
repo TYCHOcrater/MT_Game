@@ -36,3 +36,6 @@ Backup/
 *.log
 *.tlog
 UpgradeLog.htm
+
+# Claude Code local config (user-specific tool permissions)
+.claude/settings.local.json
