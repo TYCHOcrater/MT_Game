@@ -4,6 +4,7 @@
 #include "AMTCharacter.h"
 #include "MTHUD.h"
 #include "MTGameInstance.h"
+#include "MTGameState.h"
 #include "MTWeapon.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Engine/SkeletalMesh.h"
@@ -16,6 +17,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Controller.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
 #include "GameFramework/GameModeBase.h"
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
@@ -179,23 +181,47 @@ void AAMTCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Pawn, Params);
 	const FVector ImpactEnd = bHit ? Hit.ImpactPoint : End;
 
+	bool bHitTarget = false;
+	bool bWasCrit = false;
 	if (bHit && Hit.GetActor())
 	{
-		FPointDamageEvent DamageEvent(Weapon->FireDamage, Hit, Direction, nullptr);
-		Hit.GetActor()->TakeDamage(Weapon->FireDamage, DamageEvent, GetController(), this);
+		const float BaseDamage = FMath::FRandRange(Weapon->FireDamageMin, Weapon->FireDamageMax);
+		bWasCrit = FMath::FRand() < Weapon->CritChance;
+		const float Damage = BaseDamage * (bWasCrit ? Weapon->CritDamageMultiplier : 1.0f);
+
+		// Tag the victim so HandleDeath can mark a crit kill in the feed
+		if (AAMTCharacter* Victim = Cast<AAMTCharacter>(Hit.GetActor()))
+		{
+			Victim->bLastIncomingDamageWasCrit = bWasCrit;
+		}
+
+		FPointDamageEvent DamageEvent(Damage, Hit, Direction, nullptr);
+		Hit.GetActor()->TakeDamage(Damage, DamageEvent, GetController(), this);
+		bHitTarget = Hit.GetActor()->IsA<APawn>();
 	}
 
 	const FVector MuzzleLoc = Weapon->GetMuzzleLocation();
-	MulticastFireFX(FVector_NetQuantize(MuzzleLoc), FVector_NetQuantize(ImpactEnd), bHit);
+	MulticastFireFX(FVector_NetQuantize(MuzzleLoc), FVector_NetQuantize(ImpactEnd), bHit, bHitTarget, bWasCrit);
 }
 
-void AAMTCharacter::MulticastFireFX_Implementation(FVector_NetQuantize Start, FVector_NetQuantize End, bool bHit)
+void AAMTCharacter::MulticastFireFX_Implementation(FVector_NetQuantize Start, FVector_NetQuantize End, bool bHit, bool bHitTarget, bool bWasCrit)
 {
 	const FColor LineColor = bHit ? FColor::Red : FColor::Yellow;
 	DrawDebugLine(GetWorld(), Start, End, LineColor, false, 0.5f, 0, 1.0f);
 	if (bHit)
 	{
 		DrawDebugSphere(GetWorld(), End, 8.0f, 8, FColor::Red, false, 0.5f);
+	}
+
+	if (bHitTarget && IsLocallyControlled())
+	{
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			if (AMTHUD* HUD = Cast<AMTHUD>(PC->GetHUD()))
+			{
+				HUD->ShowHitMarker(bWasCrit);
+			}
+		}
 	}
 }
 
@@ -272,7 +298,7 @@ float AAMTCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEv
 	if (Health <= 0.0f)
 	{
 		Health = 0.0f;
-		HandleDeath();
+		HandleDeath(EventInstigator);
 	}
 
 	return Applied;
@@ -283,7 +309,7 @@ void AAMTCharacter::OnRep_Health()
 	// Hook for HUD updates etc.
 }
 
-void AAMTCharacter::HandleDeath()
+void AAMTCharacter::HandleDeath(AController* Killer)
 {
 	MulticastOnDeath();
 
@@ -295,6 +321,37 @@ void AAMTCharacter::HandleDeath()
 	}
 
 	AController* DeadController = GetController();
+
+	// Broadcast kill event to all clients
+	if (AMTGameState* GS = World->GetGameState<AMTGameState>())
+	{
+		auto GetPlayerName = [](AController* C) -> FString
+		{
+			if (C && C->PlayerState)
+			{
+				const FString N = C->PlayerState->GetPlayerName();
+				if (!N.IsEmpty()) return N;
+			}
+			return TEXT("Player");
+		};
+
+		const FString VictimName = GetPlayerName(DeadController);
+		const FString CritSuffix = bLastIncomingDamageWasCrit ? TEXT(" [CRIT]") : TEXT("");
+		FString Text;
+		if (Killer && Killer != DeadController)
+		{
+			const FString KillerName = GetPlayerName(Killer);
+			Text = FString::Printf(TEXT("%s -> %s%s"), *KillerName, *VictimName, *CritSuffix);
+		}
+		else
+		{
+			Text = FString::Printf(TEXT("%s died"), *VictimName);
+		}
+		GS->MulticastKillEvent(Text);
+	}
+
+	bLastIncomingDamageWasCrit = false;
+
 	if (DeadController)
 	{
 		DeadController->UnPossess();

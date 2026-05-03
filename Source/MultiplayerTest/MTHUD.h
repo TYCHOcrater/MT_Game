@@ -15,6 +15,15 @@ struct FMTNotification
 	float ExpireTime = 0.0f;
 };
 
+USTRUCT()
+struct FMTKillEvent
+{
+	GENERATED_BODY()
+
+	FString Text;
+	float ExpireTime = 0.0f;
+};
+
 UCLASS()
 class MULTIPLAYERTEST_API AMTHUD : public AHUD
 {
@@ -27,13 +36,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD")
 	float NotificationDuration = 5.0f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD|KillFeed")
+	float KillFeedDuration = 5.0f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD|HitMarker")
+	float HitMarkerDuration = 0.15f;
+
 	UFUNCTION(BlueprintCallable, Category = "HUD")
 	void ToggleHUD() { bShowMTHUD = !bShowMTHUD; }
 
 	void PushNotification(const FString& Text);
 
+	void PushKillEvent(const FString& Text);
+
+	void ShowHitMarker(bool bIsCrit = false);
+
 	virtual void DrawHUD() override;
 
 protected:
 	TArray<FMTNotification> Notifications;
+	TArray<FMTKillEvent> KillFeed;
+	float LastHitMarkerTime = -1000.0f;
+	bool bLastHitWasCrit = false;
 };

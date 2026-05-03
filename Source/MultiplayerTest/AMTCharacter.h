@@ -80,14 +80,17 @@ protected:
 	void ServerFire(FVector_NetQuantize Start, FVector_NetQuantize Direction);
 
 	UFUNCTION(NetMulticast, Unreliable)
-	void MulticastFireFX(FVector_NetQuantize Start, FVector_NetQuantize End, bool bHit);
+	void MulticastFireFX(FVector_NetQuantize Start, FVector_NetQuantize End, bool bHit, bool bHitTarget, bool bWasCrit);
 
 	UFUNCTION()
 	void OnRep_Health();
 
 	float LastFireTime = -1.0f;
 
-	void HandleDeath();
+	/** Server-only flag set by the shooter just before applying damage; read in HandleDeath to tag crit kills in the feed. */
+	bool bLastIncomingDamageWasCrit = false;
+
+	void HandleDeath(AController* Killer);
 
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastOnDeath();

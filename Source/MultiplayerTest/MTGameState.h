@@ -14,4 +14,7 @@ class MULTIPLAYERTEST_API AMTGameState : public AGameStateBase
 public:
 	UFUNCTION(NetMulticast, Reliable)
 	void MulticastNotification(const FString& Message);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastKillEvent(const FString& Message);
 };

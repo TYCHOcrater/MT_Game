@@ -22,3 +22,20 @@ void AMTGameState::MulticastNotification_Implementation(const FString& Message)
 		}
 	}
 }
+
+void AMTGameState::MulticastKillEvent_Implementation(const FString& Message)
+{
+	UWorld* World = GetWorld();
+	if (!World || !GEngine)
+	{
+		return;
+	}
+
+	if (APlayerController* PC = GEngine->GetFirstLocalPlayerController(World))
+	{
+		if (AMTHUD* HUD = Cast<AMTHUD>(PC->GetHUD()))
+		{
+			HUD->PushKillEvent(Message);
+		}
+	}
+}
