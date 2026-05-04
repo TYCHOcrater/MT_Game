@@ -6,6 +6,7 @@
 #include "MTGameInstance.h"
 #include "MTGameState.h"
 #include "MTWeapon.h"
+#include "MTWeaponPickup.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/DamageEvents.h"
@@ -46,6 +47,13 @@ AAMTCharacter::AAMTCharacter()
 	WeaponChild->SetupAttachment(FirstPersonCamera);
 	WeaponChild->SetRelativeLocation(FVector(20.0f, 12.0f, -10.0f));
 
+	// Secondary mount — mirrored to the left. Empty by default; populated when the character picks up a 2nd gun.
+	WeaponChildSecondary = CreateDefaultSubobject<UChildActorComponent>(TEXT("WeaponChildSecondary"));
+	WeaponChildSecondary->SetupAttachment(FirstPersonCamera);
+	WeaponChildSecondary->SetRelativeLocation(FVector(20.0f, -12.0f, -10.0f));
+	WeaponChildSecondary->SetIsReplicated(true);
+	WeaponChild->SetIsReplicated(true);
+
 	// FPS-style rotation: camera follows controller yaw
 	bUseControllerRotationYaw = true;
 	bUseControllerRotationPitch = false;
@@ -82,11 +90,92 @@ void AAMTCharacter::BeginPlay()
 	{
 		Health = MaxHealth;
 	}
+
+	// Mirror the primary weapon mount onto the secondary slot so an akimbo gun matches the primary's
+	// scale and rotation (whatever the BP has tuned), just on the opposite side of the camera.
+	if (WeaponChild && WeaponChildSecondary)
+	{
+		const FVector PrimaryLoc = WeaponChild->GetRelativeLocation();
+		WeaponChildSecondary->SetRelativeLocation(FVector(PrimaryLoc.X, -PrimaryLoc.Y, PrimaryLoc.Z));
+		WeaponChildSecondary->SetRelativeRotation(WeaponChild->GetRelativeRotation());
+		WeaponChildSecondary->SetRelativeScale3D(WeaponChild->GetRelativeScale3D());
+	}
 }
 
 AMTWeapon* AAMTCharacter::GetCurrentWeapon() const
 {
 	return WeaponChild ? Cast<AMTWeapon>(WeaponChild->GetChildActor()) : nullptr;
+}
+
+AMTWeapon* AAMTCharacter::GetSecondaryWeapon() const
+{
+	return WeaponChildSecondary ? Cast<AMTWeapon>(WeaponChildSecondary->GetChildActor()) : nullptr;
+}
+
+bool AAMTCharacter::TryEquipWeapon(TSubclassOf<AMTWeapon> NewWeaponClass)
+{
+	if (!HasAuthority() || !NewWeaponClass)
+	{
+		return false;
+	}
+
+	// Primary slot first if it's empty
+	if (WeaponChild && !WeaponChild->GetChildActorClass())
+	{
+		WeaponChild->SetChildActorClass(NewWeaponClass);
+		return true;
+	}
+
+	// Otherwise try secondary
+	if (WeaponChildSecondary && !WeaponChildSecondary->GetChildActorClass())
+	{
+		WeaponChildSecondary->SetChildActorClass(NewWeaponClass);
+		return true;
+	}
+
+	return false;
+}
+
+void AAMTCharacter::DropPrimaryWeapon()
+{
+	if (!HasAuthority() || !WeaponChild)
+	{
+		return;
+	}
+
+	UClass* DroppedClass = WeaponChild->GetChildActorClass();
+	if (!DroppedClass || !WeaponPickupClass)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		return;
+	}
+
+	// Spawn the pickup ahead of the character, with the configurable forward + vertical offsets
+	const FVector Forward = GetActorForwardVector();
+	const FVector SpawnLoc = GetActorLocation() + Forward * WeaponDropForwardDistance + FVector(0.0f, 0.0f, WeaponDropVerticalOffset);
+	const FRotator SpawnRot = FRotator::ZeroRotator;
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+	SpawnParams.Owner = this;
+	SpawnParams.bDeferConstruction = true;
+
+	if (AMTWeaponPickup* Pickup = World->SpawnActor<AMTWeaponPickup>(WeaponPickupClass, SpawnLoc, SpawnRot, SpawnParams))
+	{
+		// Set the class BEFORE FinishSpawning so the server's BeginPlay sees it and applies the mesh.
+		// (Without deferring, BeginPlay runs inside SpawnActor with WeaponClass still null, and the
+		// server stays visually empty — only late-replicating clients see the mesh via OnRep.)
+		Pickup->WeaponClass = DroppedClass;
+		Pickup->FinishSpawning(FTransform(SpawnRot, SpawnLoc));
+	}
+
+	// Clear the slot — destroys the equipped weapon child actor
+	WeaponChild->SetChildActorClass(nullptr);
 }
 
 // Called every frame
@@ -158,50 +247,89 @@ void AAMTCharacter::Fire()
 
 void AAMTCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction)
 {
-	AMTWeapon* Weapon = GetCurrentWeapon();
-	if (!Weapon)
+	AMTWeapon* Primary = GetCurrentWeapon();
+	AMTWeapon* Secondary = GetSecondaryWeapon();
+
+	// Need at least one equipped weapon to fire
+	if (!Primary && !Secondary)
 	{
 		return;
 	}
 
+	// Use the shorter of the two FireIntervals for the cooldown — both barrels fire on the same trigger pull
+	const float FireInterval = FMath::Min(
+		Primary ? Primary->FireInterval : FLT_MAX,
+		Secondary ? Secondary->FireInterval : FLT_MAX);
+
 	const float Now = GetWorld()->GetTimeSeconds();
-	if (Now - LastFireTime < Weapon->FireInterval)
+	if (Now - LastFireTime < FireInterval)
 	{
 		return;
 	}
 	LastFireTime = Now;
 
-	const FVector End = (FVector)Start + (FVector)Direction * Weapon->FireRange;
+	// Both barrels point the same direction (camera forward). Single trace, both guns contribute damage independently.
+	const float TraceRange = FMath::Max(
+		Primary ? Primary->FireRange : 0.0f,
+		Secondary ? Secondary->FireRange : 0.0f);
+	const FVector End = (FVector)Start + (FVector)Direction * TraceRange;
 
 	FHitResult Hit;
 	FCollisionQueryParams Params;
 	Params.AddIgnoredActor(this);
-	Params.AddIgnoredActor(Weapon);
+	if (Primary) Params.AddIgnoredActor(Primary);
+	if (Secondary) Params.AddIgnoredActor(Secondary);
 
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Pawn, Params);
 	const FVector ImpactEnd = bHit ? Hit.ImpactPoint : End;
+	AAMTCharacter* Victim = bHit ? Cast<AAMTCharacter>(Hit.GetActor()) : nullptr;
+	const bool bHitTarget = bHit && Hit.GetActor() && Hit.GetActor()->IsA<APawn>();
 
-	bool bHitTarget = false;
-	bool bWasCrit = false;
-	if (bHit && Hit.GetActor())
+	// Roll crit + damage independently for each equipped barrel
+	auto RollShot = [&](AMTWeapon* W) -> TPair<float, bool>
 	{
-		const float BaseDamage = FMath::FRandRange(Weapon->FireDamageMin, Weapon->FireDamageMax);
-		bWasCrit = FMath::FRand() < Weapon->CritChance;
-		const float Damage = BaseDamage * (bWasCrit ? Weapon->CritDamageMultiplier : 1.0f);
+		if (!W) return {0.0f, false};
+		const float Base = FMath::FRandRange(W->FireDamageMin, W->FireDamageMax);
+		const bool bCrit = FMath::FRand() < W->CritChance;
+		return {Base * (bCrit ? W->CritDamageMultiplier : 1.0f), bCrit};
+	};
 
-		// Tag the victim so HandleDeath can mark a crit kill in the feed
-		if (AAMTCharacter* Victim = Cast<AAMTCharacter>(Hit.GetActor()))
+	const TPair<float, bool> PrimaryShot = RollShot(Primary);
+	const TPair<float, bool> SecondaryShot = RollShot(Secondary);
+	const bool bAnyCrit = PrimaryShot.Value || SecondaryShot.Value;
+
+	// Apply damage from each equipped barrel. Drop-on-crit fires before damage so the weapon is dropped
+	// regardless of whether the shot is lethal. Drops at most once per ServerFire call.
+	if (Victim)
+	{
+		if (bAnyCrit && Victim->GetCurrentWeapon())
 		{
-			Victim->bLastIncomingDamageWasCrit = bWasCrit;
+			Victim->DropPrimaryWeapon();
 		}
 
-		FPointDamageEvent DamageEvent(Damage, Hit, Direction, nullptr);
-		Hit.GetActor()->TakeDamage(Damage, DamageEvent, GetController(), this);
-		bHitTarget = Hit.GetActor()->IsA<APawn>();
+		auto ApplyShot = [&](float Damage, bool bCrit)
+		{
+			if (Damage <= 0.0f || Victim->IsDead()) return;
+			Victim->bLastIncomingDamageWasCrit = bCrit;
+			FPointDamageEvent DamageEvent(Damage, Hit, Direction, nullptr);
+			Victim->TakeDamage(Damage, DamageEvent, GetController(), this);
+		};
+
+		ApplyShot(PrimaryShot.Key, PrimaryShot.Value);
+		ApplyShot(SecondaryShot.Key, SecondaryShot.Value);
 	}
 
-	const FVector MuzzleLoc = Weapon->GetMuzzleLocation();
-	MulticastFireFX(FVector_NetQuantize(MuzzleLoc), FVector_NetQuantize(ImpactEnd), bHit, bHitTarget, bWasCrit);
+	// One FX broadcast per barrel — different muzzle origins so two tracer lines render
+	if (Primary)
+	{
+		const FVector MuzzleLoc = Primary->GetMuzzleLocation();
+		MulticastFireFX(FVector_NetQuantize(MuzzleLoc), FVector_NetQuantize(ImpactEnd), bHit, bHitTarget, PrimaryShot.Value);
+	}
+	if (Secondary)
+	{
+		const FVector MuzzleLoc = Secondary->GetMuzzleLocation();
+		MulticastFireFX(FVector_NetQuantize(MuzzleLoc), FVector_NetQuantize(ImpactEnd), bHit, bHitTarget, SecondaryShot.Value);
+	}
 }
 
 void AAMTCharacter::MulticastFireFX_Implementation(FVector_NetQuantize Start, FVector_NetQuantize End, bool bHit, bool bHitTarget, bool bWasCrit)

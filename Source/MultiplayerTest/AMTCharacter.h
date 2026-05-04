@@ -11,6 +11,7 @@ class UChildActorComponent;
 class UInputMappingContext;
 class UInputAction;
 class AMTWeapon;
+class AMTWeaponPickup;
 struct FInputActionValue;
 
 UCLASS()
@@ -27,6 +28,27 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	AMTWeapon* GetCurrentWeapon() const;
 
+	UFUNCTION(BlueprintPure, Category = "Combat")
+	AMTWeapon* GetSecondaryWeapon() const;
+
+	/** Class of pickup actor to spawn when this character drops its weapon. Set in BP. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat")
+	TSubclassOf<AMTWeaponPickup> WeaponPickupClass;
+
+	/** How far in front of the character (along their forward vector) the dropped pickup spawns, in cm. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat", meta = (ClampMin = "0.0"))
+	float WeaponDropForwardDistance = 250.0f;
+
+	/** Vertical offset relative to actor origin when spawning the pickup, in cm. Negative = below capsule center. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat")
+	float WeaponDropVerticalOffset = -30.0f;
+
+	/** Server-only. Tries to put the given weapon class into primary (if empty) then secondary. Returns true on success. */
+	bool TryEquipWeapon(TSubclassOf<AMTWeapon> NewWeaponClass);
+
+	/** Server-only. Drops the primary weapon as a pickup at the character's location and clears the slot. */
+	void DropPrimaryWeapon();
+
 	UPROPERTY(ReplicatedUsing = OnRep_Health, BlueprintReadOnly, Category = "Combat")
 	float Health = 100.0f;
 
@@ -42,6 +64,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
 	TObjectPtr<UChildActorComponent> WeaponChild;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
+	TObjectPtr<UChildActorComponent> WeaponChildSecondary;
 
 	/** Mapping context applied to the local player on possession. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
