@@ -156,7 +156,7 @@ void AAMTCharacter::Fire()
 	ServerFire(Start, Direction);
 }
 
-void AAMTCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector_NetQuantize Direction)
+void AAMTCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction)
 {
 	AMTWeapon* Weapon = GetCurrentWeapon();
 	if (!Weapon)

@@ -77,7 +77,7 @@ protected:
 	void ToggleMenu();
 
 	UFUNCTION(Server, Reliable)
-	void ServerFire(FVector_NetQuantize Start, FVector_NetQuantize Direction);
+	void ServerFire(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction);
 
 	UFUNCTION(NetMulticast, Unreliable)
 	void MulticastFireFX(FVector_NetQuantize Start, FVector_NetQuantize End, bool bHit, bool bHitTarget, bool bWasCrit);
