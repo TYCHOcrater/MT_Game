@@ -43,6 +43,26 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat")
 	float WeaponDropVerticalOffset = -30.0f;
 
+	/** Peak amplitude of the walk bob (cm). Scales with current speed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float WeaponBobAmplitude = 1.5f;
+
+	/** Bob frequency in Hz at full sprint. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float WeaponBobFrequency = 8.0f;
+
+	/** How much the weapon lags behind look rotation. Higher = more dramatic sway. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float WeaponSwayLookAmount = 0.35f;
+
+	/** How fast the weapon recovers from look sway. Higher = snappier. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.1"))
+	float WeaponSwayInterpSpeed = 6.0f;
+
+	/** Idle sway amplitude (cm) — gentle motion when standing still. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float WeaponIdleSwayAmplitude = 0.4f;
+
 	/** Server-only. Tries to put the given weapon class into primary (if empty) then secondary. Returns true on success. */
 	bool TryEquipWeapon(TSubclassOf<AMTWeapon> NewWeaponClass);
 
@@ -90,6 +110,13 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
 	TObjectPtr<UInputAction> ToggleMenuAction;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
+	TObjectPtr<UInputAction> SprintAction;
+
+	/** MaxWalkSpeed while the sprint key is held. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement", meta = (ClampMin = "0.0"))
+	float SprintSpeed = 1100.0f;
+
 	virtual void BeginPlay() override;
 	virtual void PawnClientRestart() override;
 
@@ -100,6 +127,14 @@ protected:
 	void Fire();
 	void ToggleHUD();
 	void ToggleMenu();
+	void StartSprint();
+	void StopSprint();
+
+	UFUNCTION(Server, Reliable)
+	void ServerSetSprint(bool bSprinting);
+
+	/** Captured at BeginPlay so we can restore non-sprint speed without hardcoding. */
+	float BaseWalkSpeed = 600.0f;
 
 	UFUNCTION(Server, Reliable)
 	void ServerFire(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction);
@@ -114,6 +149,14 @@ protected:
 
 	/** Server-only flag set by the shooter just before applying damage; read in HandleDeath to tag crit kills in the feed. */
 	bool bLastIncomingDamageWasCrit = false;
+
+	// Weapon sway state — local-only, captured from BP-overridden mount transforms in BeginPlay
+	FVector PrimaryBaseLocation = FVector::ZeroVector;
+	FVector SecondaryBaseLocation = FVector::ZeroVector;
+	float BobTimeAccumulator = 0.0f;
+	float IdleTimeAccumulator = 0.0f;
+	FVector SwayCurrentOffset = FVector::ZeroVector;
+	FRotator LastControlRotation = FRotator::ZeroRotator;
 
 	void HandleDeath(AController* Killer);
 

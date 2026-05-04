@@ -91,6 +91,12 @@ void AAMTCharacter::BeginPlay()
 		Health = MaxHealth;
 	}
 
+	// Capture whatever base walk speed the BP/CMC has tuned, so sprint can restore it cleanly
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		BaseWalkSpeed = CMC->MaxWalkSpeed;
+	}
+
 	// Mirror the primary weapon mount onto the secondary slot so an akimbo gun matches the primary's
 	// scale and rotation (whatever the BP has tuned), just on the opposite side of the camera.
 	if (WeaponChild && WeaponChildSecondary)
@@ -99,6 +105,17 @@ void AAMTCharacter::BeginPlay()
 		WeaponChildSecondary->SetRelativeLocation(FVector(PrimaryLoc.X, -PrimaryLoc.Y, PrimaryLoc.Z));
 		WeaponChildSecondary->SetRelativeRotation(WeaponChild->GetRelativeRotation());
 		WeaponChildSecondary->SetRelativeScale3D(WeaponChild->GetRelativeScale3D());
+	}
+
+	// Capture base mount positions for weapon sway. Done after the mirror above so the secondary's base
+	// reflects its mirrored position. Sway adds offsets on top of these without losing the BP-tuned origin.
+	if (WeaponChild)
+	{
+		PrimaryBaseLocation = WeaponChild->GetRelativeLocation();
+	}
+	if (WeaponChildSecondary)
+	{
+		SecondaryBaseLocation = WeaponChildSecondary->GetRelativeLocation();
 	}
 }
 
@@ -182,6 +199,54 @@ void AAMTCharacter::DropPrimaryWeapon()
 void AAMTCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Weapon sway is purely a local first-person feel effect — skip on remote pawns and the server's view of clients.
+	if (!IsLocallyControlled() || !FirstPersonCamera)
+	{
+		return;
+	}
+
+	// Speed-scaled walk bob: amplitude ramps up with movement speed, frequency speeds up too.
+	const UCharacterMovementComponent* CMC = GetCharacterMovement();
+	const float MaxSpeed = CMC ? CMC->MaxWalkSpeed : 600.0f;
+	const float CurSpeed = GetVelocity().Size2D();
+	const float SpeedRatio = FMath::Clamp(CurSpeed / FMath::Max(MaxSpeed, 1.0f), 0.0f, 1.0f);
+
+	BobTimeAccumulator += DeltaTime * WeaponBobFrequency * (0.5f + 0.5f * SpeedRatio);
+	IdleTimeAccumulator += DeltaTime;
+
+	// Figure-8 bob: vertical at 2x frequency, horizontal at 1x — feels like footsteps
+	const float BobV = FMath::Sin(BobTimeAccumulator * 2.0f * PI) * WeaponBobAmplitude * SpeedRatio;
+	const float BobH = FMath::Sin(BobTimeAccumulator * PI) * WeaponBobAmplitude * 0.5f * SpeedRatio;
+
+	// Idle sway: small triple-frequency drift, fades out as you move
+	const float IdleAmp = WeaponIdleSwayAmplitude * (1.0f - SpeedRatio);
+	const float IdleX = FMath::Sin(IdleTimeAccumulator * 1.2f) * IdleAmp * 0.5f;
+	const float IdleY = FMath::Sin(IdleTimeAccumulator * 0.8f) * IdleAmp;
+	const float IdleZ = FMath::Sin(IdleTimeAccumulator * 1.5f) * IdleAmp * 0.7f;
+
+	// Look sway: lag behind controller rotation deltas, then ease back
+	const APlayerController* PC = Cast<APlayerController>(GetController());
+	const FRotator CurRot = PC ? PC->GetControlRotation() : FRotator::ZeroRotator;
+	const FRotator RotDelta = (CurRot - LastControlRotation).GetNormalized();
+	LastControlRotation = CurRot;
+
+	const FVector SwayTarget(0.0f, -RotDelta.Yaw * WeaponSwayLookAmount, -RotDelta.Pitch * WeaponSwayLookAmount);
+	SwayCurrentOffset = FMath::VInterpTo(SwayCurrentOffset, SwayTarget, DeltaTime, WeaponSwayInterpSpeed);
+
+	const FVector Offset(
+		IdleX,
+		BobH + IdleY + SwayCurrentOffset.Y,
+		BobV + IdleZ + SwayCurrentOffset.Z);
+
+	if (WeaponChild)
+	{
+		WeaponChild->SetRelativeLocation(PrimaryBaseLocation + Offset);
+	}
+	if (WeaponChildSecondary)
+	{
+		WeaponChildSecondary->SetRelativeLocation(SecondaryBaseLocation + Offset);
+	}
 }
 
 void AAMTCharacter::PawnClientRestart()
@@ -372,6 +437,38 @@ void AAMTCharacter::ToggleMenu()
 	}
 }
 
+void AAMTCharacter::StartSprint()
+{
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->MaxWalkSpeed = SprintSpeed;
+	}
+	if (!HasAuthority())
+	{
+		ServerSetSprint(true);
+	}
+}
+
+void AAMTCharacter::StopSprint()
+{
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->MaxWalkSpeed = BaseWalkSpeed;
+	}
+	if (!HasAuthority())
+	{
+		ServerSetSprint(false);
+	}
+}
+
+void AAMTCharacter::ServerSetSprint_Implementation(bool bSprinting)
+{
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->MaxWalkSpeed = bSprinting ? SprintSpeed : BaseWalkSpeed;
+	}
+}
+
 // Called to bind functionality to input
 void AAMTCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
@@ -403,6 +500,11 @@ void AAMTCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 		if (ToggleMenuAction)
 		{
 			EIC->BindAction(ToggleMenuAction, ETriggerEvent::Started, this, &AAMTCharacter::ToggleMenu);
+		}
+		if (SprintAction)
+		{
+			EIC->BindAction(SprintAction, ETriggerEvent::Started, this, &AAMTCharacter::StartSprint);
+			EIC->BindAction(SprintAction, ETriggerEvent::Completed, this, &AAMTCharacter::StopSprint);
 		}
 	}
 }
