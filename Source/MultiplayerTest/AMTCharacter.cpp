@@ -7,8 +7,6 @@
 #include "MTGameState.h"
 #include "MTWeapon.h"
 #include "MTWeaponPickup.h"
-#include "UObject/ConstructorHelpers.h"
-#include "Engine/SkeletalMesh.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/World.h"
 #include "Camera/CameraComponent.h"
@@ -71,14 +69,10 @@ AAMTCharacter::AAMTCharacter()
 	// Hide our own visible mesh from first-person view (still visible to other clients)
 	GetMesh()->SetOwnerNoSee(true);
 
-	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshAsset(TEXT("/Engine/EngineMeshes/SkeletalCube.SkeletalCube"));
-	if (MeshAsset.Succeeded())
-	{
-		GetMesh()->SetSkeletalMesh(MeshAsset.Object);
-		GetMesh()->SetRelativeLocation(FVector(0.0f, 0.0f, -90.0f));
-		GetMesh()->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
-		GetMesh()->SetRelativeScale3D(FVector(2.0f));
-	}
+	// Standard "feet on ground, facing forward" transform for a UE-style skeleton.
+	// SkeletalMesh asset + AnimClass are assigned in BP_MTCharacter.
+	GetMesh()->SetRelativeLocation(FVector(0.0f, 0.0f, -90.0f));
+	GetMesh()->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
 }
 
 // Called when the game starts or when spawned
@@ -200,6 +194,10 @@ void AAMTCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
+	// Anim state must update for ALL instances — including remote pawns we render in third-person — so other
+	// players' AnimBPs receive Speed/AimPitch/etc. ACharacter replicates RemoteViewPitch automatically.
+	UpdateAnimationState();
+
 	// Weapon sway is purely a local first-person feel effect — skip on remote pawns and the server's view of clients.
 	if (!IsLocallyControlled() || !FirstPersonCamera)
 	{
@@ -247,6 +245,39 @@ void AAMTCharacter::Tick(float DeltaTime)
 	{
 		WeaponChildSecondary->SetRelativeLocation(SecondaryBaseLocation + Offset);
 	}
+}
+
+void AAMTCharacter::UpdateAnimationState()
+{
+	const UCharacterMovementComponent* CMC = GetCharacterMovement();
+
+	const FVector Vel = GetVelocity();
+	Speed = Vel.Size2D();
+
+	// Project velocity into actor-local space. Yaw is driven by control rotation (bUseControllerRotationYaw),
+	// so this gives proper signed forward/right components for strafe blendspaces.
+	const FVector LocalVel = GetActorRotation().UnrotateVector(Vel);
+	ForwardSpeed = LocalVel.X;
+	RightSpeed = LocalVel.Y;
+
+	bIsInAir = CMC && CMC->IsFalling();
+	bIsSprinting = CMC && CMC->MaxWalkSpeed > BaseWalkSpeed + 1.0f;
+
+	// AimPitch: locally controlled and the server use the live control rotation. Remote sim proxies read
+	// the replicated, packed view pitch via APawn::GetRemoteViewPitch() (returns degrees, already unpacked).
+	if (IsLocallyControlled() || HasAuthority())
+	{
+		if (const AController* C = GetController())
+		{
+			AimPitch = FRotator::NormalizeAxis(C->GetControlRotation().Pitch);
+		}
+	}
+	else
+	{
+		AimPitch = FRotator::NormalizeAxis(GetRemoteViewPitch());
+	}
+
+	AimPitch = FMath::ClampAngle(AimPitch, -90.0f, 90.0f);
 }
 
 void AAMTCharacter::PawnClientRestart()

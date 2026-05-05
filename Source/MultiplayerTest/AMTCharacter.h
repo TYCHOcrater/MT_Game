@@ -75,6 +75,32 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Combat")
 	bool IsDead() const { return Health <= 0.0f; }
 
+	// === Animation State (read by AnimBP each frame; updated for both local and remote pawns) ===
+
+	/** Unsigned 2D ground speed in cm/s. Drives Idle/Walk/Run/Sprint blend. */
+	UPROPERTY(BlueprintReadOnly, Category = "Animation")
+	float Speed = 0.0f;
+
+	/** Signed local-space velocity along actor forward (+fwd / -back). For strafe blendspaces. */
+	UPROPERTY(BlueprintReadOnly, Category = "Animation")
+	float ForwardSpeed = 0.0f;
+
+	/** Signed local-space velocity along actor right (+right / -left). For strafe blendspaces. */
+	UPROPERTY(BlueprintReadOnly, Category = "Animation")
+	float RightSpeed = 0.0f;
+
+	/** Camera/aim pitch in degrees, clamped to [-90, 90]. Used for aim-offset poses. Replicated for remote pawns via ACharacter::RemoteViewPitch. */
+	UPROPERTY(BlueprintReadOnly, Category = "Animation")
+	float AimPitch = 0.0f;
+
+	/** True while the character is falling/jumping (CharacterMovement IsFalling). */
+	UPROPERTY(BlueprintReadOnly, Category = "Animation")
+	bool bIsInAir = false;
+
+	/** True while sprint key is held (MaxWalkSpeed pushed above the captured base). */
+	UPROPERTY(BlueprintReadOnly, Category = "Animation")
+	bool bIsSprinting = false;
+
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
@@ -157,6 +183,9 @@ protected:
 	float IdleTimeAccumulator = 0.0f;
 	FVector SwayCurrentOffset = FVector::ZeroVector;
 	FRotator LastControlRotation = FRotator::ZeroRotator;
+
+	/** Refresh BlueprintReadOnly anim-state vars (Speed, ForwardSpeed, AimPitch, bIsInAir, etc.). Runs on all instances. */
+	void UpdateAnimationState();
 
 	void HandleDeath(AController* Killer);
 
