@@ -12,6 +12,7 @@ class UInputMappingContext;
 class UInputAction;
 class AMTWeapon;
 class AMTWeaponPickup;
+class UMTCharacterDefinition;
 struct FInputActionValue;
 
 UCLASS()
@@ -103,6 +104,15 @@ public:
 
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
+	virtual void PossessedBy(AController* NewController) override;
+	virtual void OnRep_PlayerState() override;
+
+	/** Apply mesh + AnimBP from a CharacterDefinition. Safe on any net role; no-op if Def is null. */
+	void ApplyCharacterDefinition(UMTCharacterDefinition* Def);
+
+	/** Re-pull CharacterDefIndex from this pawn's PlayerState and apply via the registry. */
+	void RefreshCharacterFromPlayerState();
 
 protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")

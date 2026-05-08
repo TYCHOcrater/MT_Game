@@ -5,8 +5,13 @@
 #include "MTHUD.h"
 #include "MTGameInstance.h"
 #include "MTGameState.h"
+#include "MTPlayerState.h"
+#include "MTCharacterDefinition.h"
+#include "MTCharacterRegistry.h"
 #include "MTWeapon.h"
 #include "MTWeaponPickup.h"
+#include "Animation/AnimInstance.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Engine/DamageEvents.h"
 #include "Engine/World.h"
 #include "Camera/CameraComponent.h"
@@ -295,6 +300,92 @@ void AAMTCharacter::PawnClientRestart()
 			}
 		}
 	}
+
+	// Push our locally chosen character up to the server. PlayerState may not be valid yet on first
+	// possess for a remote client; OnRep_PlayerState below also makes the call once it arrives.
+	if (IsLocallyControlled())
+	{
+		if (AMTPlayerState* PS = GetPlayerState<AMTPlayerState>())
+		{
+			if (UMTGameInstance* GI = GetGameInstance<UMTGameInstance>())
+			{
+				PS->ServerRequestSetCharacterDefIndex(GI->PreferredCharacterIndex);
+			}
+		}
+	}
+}
+
+void AAMTCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+
+	// Server: PS now exists for this pawn — apply whatever character index it carries.
+	RefreshCharacterFromPlayerState();
+}
+
+void AAMTCharacter::OnRep_PlayerState()
+{
+	Super::OnRep_PlayerState();
+
+	// Client: PS just became valid — apply the replicated character index.
+	RefreshCharacterFromPlayerState();
+
+	// Local client: also push our preference up now that PS is reachable.
+	if (IsLocallyControlled())
+	{
+		if (AMTPlayerState* PS = GetPlayerState<AMTPlayerState>())
+		{
+			if (UMTGameInstance* GI = GetGameInstance<UMTGameInstance>())
+			{
+				PS->ServerRequestSetCharacterDefIndex(GI->PreferredCharacterIndex);
+			}
+		}
+	}
+}
+
+void AAMTCharacter::RefreshCharacterFromPlayerState()
+{
+	const AMTPlayerState* PS = GetPlayerState<AMTPlayerState>();
+	if (!PS)
+	{
+		return;
+	}
+	const UMTCharacterRegistry* Registry = UMTCharacterRegistry::Get();
+	if (!Registry)
+	{
+		return;
+	}
+	if (UMTCharacterDefinition* Def = Registry->LoadDefinition(PS->CharacterDefIndex))
+	{
+		ApplyCharacterDefinition(Def);
+	}
+}
+
+void AAMTCharacter::ApplyCharacterDefinition(UMTCharacterDefinition* Def)
+{
+	if (!Def)
+	{
+		return;
+	}
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!MeshComp)
+	{
+		return;
+	}
+
+	if (USkeletalMesh* SK = Def->Mesh.LoadSynchronous())
+	{
+		MeshComp->SetSkeletalMesh(SK);
+	}
+	if (UClass* AnimClass = Def->AnimBP.LoadSynchronous())
+	{
+		MeshComp->SetAnimInstanceClass(AnimClass);
+	}
+
+	MeshComp->SetRelativeLocation(Def->MeshRelativeLocation);
+	MeshComp->SetRelativeRotation(Def->MeshRelativeRotation);
+	MeshComp->SetRelativeScale3D(FVector(Def->MeshUniformScale));
 }
 
 void AAMTCharacter::Move(const FInputActionValue& Value)

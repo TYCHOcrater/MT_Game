@@ -55,6 +55,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "MT|UI")
 	void SetMenuStatus(const FString& Text);
 
+	/** Local player's chosen character index. Pushed to server-replicated PlayerState by the pawn after possession. */
+	UPROPERTY(BlueprintReadOnly, Category = "MT|Character")
+	uint8 PreferredCharacterIndex = 0;
+
+	/** Sets the local preference and forwards it to the existing pawn's PlayerState (so it applies live, not only on next respawn). */
+	UFUNCTION(BlueprintCallable, Category = "MT|Character")
+	void SetPreferredCharacterIndex(uint8 NewIndex);
+
 protected:
 	IOnlineSessionPtr GetSessions() const;
 

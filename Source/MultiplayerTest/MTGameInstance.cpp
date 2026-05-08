@@ -1,6 +1,9 @@
 // Fill out your copyright notice in the Description page of Project Settings.
 
 #include "MTGameInstance.h"
+#include "AMTCharacter.h"
+#include "MTPlayerState.h"
+#include "MTCharacterRegistry.h"
 #include "OnlineSubsystem.h"
 #include "OnlineSessionSettings.h"
 #include "Interfaces/OnlineSessionInterface.h"
@@ -540,6 +543,33 @@ void UMTGameInstance::SetMenuStatus(const FString& Text)
 	if (MenuStatusText.IsValid())
 	{
 		MenuStatusText->SetText(FText::FromString(Text));
+	}
+}
+
+void UMTGameInstance::SetPreferredCharacterIndex(uint8 NewIndex)
+{
+	const UMTCharacterRegistry* Registry = UMTCharacterRegistry::Get();
+	if (Registry && NewIndex >= Registry->Num())
+	{
+		return;
+	}
+
+	PreferredCharacterIndex = NewIndex;
+
+	// If we already have a pawn in-world (mid-match swap), forward immediately.
+	// Otherwise the value will be picked up by AAMTCharacter on next possess.
+	if (UWorld* World = GetWorld())
+	{
+		if (APlayerController* PC = World->GetFirstPlayerController())
+		{
+			if (AAMTCharacter* Pawn = Cast<AAMTCharacter>(PC->GetPawn()))
+			{
+				if (AMTPlayerState* PS = Pawn->GetPlayerState<AMTPlayerState>())
+				{
+					PS->ServerRequestSetCharacterDefIndex(NewIndex);
+				}
+			}
+		}
 	}
 }
 
