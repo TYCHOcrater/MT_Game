@@ -57,6 +57,11 @@ AAMTCharacter::AAMTCharacter()
 	WeaponChildSecondary->SetIsReplicated(true);
 	WeaponChild->SetIsReplicated(true);
 
+	// Third-person primary weapon mount — attached to the mesh's right-hand socket.
+	WeaponChildThirdPerson = CreateDefaultSubobject<UChildActorComponent>(TEXT("WeaponChildThirdPerson"));
+	WeaponChildThirdPerson->SetupAttachment(GetMesh(), TEXT("weapon_socket_r"));
+	WeaponChildThirdPerson->SetIsReplicated(true);
+
 	// FPS-style rotation: camera follows controller yaw
 	bUseControllerRotationYaw = true;
 	bUseControllerRotationPitch = false;
@@ -106,6 +111,18 @@ void AAMTCharacter::BeginPlay()
 		WeaponChildSecondary->SetRelativeScale3D(WeaponChild->GetRelativeScale3D());
 	}
 
+	// Mirror WeaponChild's class onto the 3P mount (catches BP-default class case).
+	if (WeaponChild && WeaponChildThirdPerson)
+	{
+		if (UClass* PrimaryClass = WeaponChild->GetChildActorClass())
+		{
+			if (!WeaponChildThirdPerson->GetChildActorClass())
+			{
+				WeaponChildThirdPerson->SetChildActorClass(PrimaryClass);
+			}
+		}
+	}
+
 	// Capture base mount positions for weapon sway. Done after the mirror above so the secondary's base
 	// reflects its mirrored position. Sway adds offsets on top of these without losing the BP-tuned origin.
 	if (WeaponChild)
@@ -116,6 +133,8 @@ void AAMTCharacter::BeginPlay()
 	{
 		SecondaryBaseLocation = WeaponChildSecondary->GetRelativeLocation();
 	}
+
+	RefreshWeaponVisibility();
 }
 
 AMTWeapon* AAMTCharacter::GetCurrentWeapon() const
@@ -139,6 +158,10 @@ bool AAMTCharacter::TryEquipWeapon(TSubclassOf<AMTWeapon> NewWeaponClass)
 	if (WeaponChild && !WeaponChild->GetChildActorClass())
 	{
 		WeaponChild->SetChildActorClass(NewWeaponClass);
+		if (WeaponChildThirdPerson)
+		{
+			WeaponChildThirdPerson->SetChildActorClass(NewWeaponClass);
+		}
 		return true;
 	}
 
@@ -192,6 +215,32 @@ void AAMTCharacter::DropPrimaryWeapon()
 
 	// Clear the slot — destroys the equipped weapon child actor
 	WeaponChild->SetChildActorClass(nullptr);
+	if (WeaponChildThirdPerson)
+	{
+		WeaponChildThirdPerson->SetChildActorClass(nullptr);
+	}
+}
+
+void AAMTCharacter::RefreshWeaponVisibility()
+{
+	auto Apply = [](UChildActorComponent* Comp, bool bOnlyOwnerSee, bool bOwnerNoSee)
+	{
+		if (!Comp) return;
+		AActor* Child = Comp->GetChildActor();
+		if (!Child) return;
+		TArray<UPrimitiveComponent*> Prims;
+		Child->GetComponents<UPrimitiveComponent>(Prims);
+		for (UPrimitiveComponent* Prim : Prims)
+		{
+			Prim->SetOnlyOwnerSee(bOnlyOwnerSee);
+			Prim->SetOwnerNoSee(bOwnerNoSee);
+		}
+	};
+
+	// FP weapons: only owner sees (camera-attached). 3P weapon: only non-owner sees (body-attached).
+	Apply(WeaponChild,            /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ false);
+	Apply(WeaponChildSecondary,   /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ false);
+	Apply(WeaponChildThirdPerson, /*bOnlyOwnerSee*/ false, /*bOwnerNoSee*/ true);
 }
 
 // Called every frame
@@ -202,6 +251,9 @@ void AAMTCharacter::Tick(float DeltaTime)
 	// Anim state must update for ALL instances — including remote pawns we render in third-person — so other
 	// players' AnimBPs receive Speed/AimPitch/etc. ACharacter replicates RemoteViewPitch automatically.
 	UpdateAnimationState();
+
+	// Idempotent re-apply of weapon visibility (handles late-replicated child actors).
+	RefreshWeaponVisibility();
 
 	// Weapon sway is purely a local first-person feel effect — skip on remote pawns and the server's view of clients.
 	if (!IsLocallyControlled() || !FirstPersonCamera)

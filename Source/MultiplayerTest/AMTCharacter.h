@@ -124,6 +124,11 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
 	TObjectPtr<UChildActorComponent> WeaponChildSecondary;
 
+	/** Third-person primary weapon mount, attached to the mesh's right-hand socket so remote players see a weapon in our hands.
+	 *  Mirrors WeaponChild's class but with reversed visibility flags (visible to non-owner only). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
+	TObjectPtr<UChildActorComponent> WeaponChildThirdPerson;
+
 	/** Mapping context applied to the local player on possession. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
 	TObjectPtr<UInputMappingContext> DefaultMappingContext;
@@ -196,6 +201,10 @@ protected:
 
 	/** Refresh BlueprintReadOnly anim-state vars (Speed, ForwardSpeed, AimPitch, bIsInAir, etc.). Runs on all instances. */
 	void UpdateAnimationState();
+
+	/** Set bOnlyOwnerSee / bOwnerNoSee on the spawned child actors of WeaponChild* so FP weapons are owner-only and
+	 *  3P weapons are non-owner-only. Idempotent; safe to call every tick (handles late-replicated child actors). */
+	void RefreshWeaponVisibility();
 
 	void HandleDeath(AController* Killer);
 
