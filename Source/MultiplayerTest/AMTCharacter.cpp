@@ -62,6 +62,11 @@ AAMTCharacter::AAMTCharacter()
 	WeaponChildThirdPerson->SetupAttachment(GetMesh(), TEXT("weapon_socket_r"));
 	WeaponChildThirdPerson->SetIsReplicated(true);
 
+	// Third-person secondary (akimbo) mount — attached to the mesh's left-hand socket.
+	WeaponChildSecondaryThirdPerson = CreateDefaultSubobject<UChildActorComponent>(TEXT("WeaponChildSecondaryThirdPerson"));
+	WeaponChildSecondaryThirdPerson->SetupAttachment(GetMesh(), TEXT("weapon_socket_l"));
+	WeaponChildSecondaryThirdPerson->SetIsReplicated(true);
+
 	// FPS-style rotation: camera follows controller yaw
 	bUseControllerRotationYaw = true;
 	bUseControllerRotationPitch = false;
@@ -123,6 +128,18 @@ void AAMTCharacter::BeginPlay()
 		}
 	}
 
+	// Same mirror for secondary akimbo: BP-default secondary class → 3P left-hand mount.
+	if (WeaponChildSecondary && WeaponChildSecondaryThirdPerson)
+	{
+		if (UClass* SecondaryClass = WeaponChildSecondary->GetChildActorClass())
+		{
+			if (!WeaponChildSecondaryThirdPerson->GetChildActorClass())
+			{
+				WeaponChildSecondaryThirdPerson->SetChildActorClass(SecondaryClass);
+			}
+		}
+	}
+
 	// Capture base mount transforms for weapon sway. Done after the mirror above so the secondary's base
 	// reflects its mirrored position. Sway adds offsets on top of these without losing the BP-tuned origin.
 	if (WeaponChild)
@@ -171,6 +188,10 @@ bool AAMTCharacter::TryEquipWeapon(TSubclassOf<AMTWeapon> NewWeaponClass)
 	if (WeaponChildSecondary && !WeaponChildSecondary->GetChildActorClass())
 	{
 		WeaponChildSecondary->SetChildActorClass(NewWeaponClass);
+		if (WeaponChildSecondaryThirdPerson)
+		{
+			WeaponChildSecondaryThirdPerson->SetChildActorClass(NewWeaponClass);
+		}
 		return true;
 	}
 
@@ -247,10 +268,11 @@ void AAMTCharacter::RefreshWeaponVisibility()
 		}
 	};
 
-	// FP weapons: only owner sees (camera-attached). 3P weapon: only non-owner sees (body-attached).
-	Apply(WeaponChild,            /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ false);
-	Apply(WeaponChildSecondary,   /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ false);
-	Apply(WeaponChildThirdPerson, /*bOnlyOwnerSee*/ false, /*bOwnerNoSee*/ true);
+	// FP weapons: only owner sees (camera-attached). 3P weapons: only non-owner sees (body-attached).
+	Apply(WeaponChild,                     /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ false);
+	Apply(WeaponChildSecondary,            /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ false);
+	Apply(WeaponChildThirdPerson,          /*bOnlyOwnerSee*/ false, /*bOwnerNoSee*/ true);
+	Apply(WeaponChildSecondaryThirdPerson, /*bOnlyOwnerSee*/ false, /*bOwnerNoSee*/ true);
 }
 
 // Called every frame
@@ -615,8 +637,21 @@ void AAMTCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector
 
 void AAMTCharacter::MulticastFireFX_Implementation(FVector_NetQuantize Start, FVector_NetQuantize End, bool bHit, bool bHitTarget, bool bWasCrit)
 {
+	// Server passes the FP weapon's muzzle as Start. That's at camera height (FP weapon is camera-attached),
+	// which looks correct from the local owner's POV — they see their own FP weapon firing.
+	// But remote viewers see the body-attached 3P weapon, so trace from FP muzzle would appear to come from
+	// the character's face. Override with the 3P weapon's muzzle on remote clients.
+	FVector RenderStart = Start;
+	if (!IsLocallyControlled() && WeaponChildThirdPerson)
+	{
+		if (AMTWeapon* TpWeapon = Cast<AMTWeapon>(WeaponChildThirdPerson->GetChildActor()))
+		{
+			RenderStart = TpWeapon->GetMuzzleLocation();
+		}
+	}
+
 	const FColor LineColor = bHit ? FColor::Red : FColor::Yellow;
-	DrawDebugLine(GetWorld(), Start, End, LineColor, false, 0.5f, 0, 1.0f);
+	DrawDebugLine(GetWorld(), RenderStart, End, LineColor, false, 0.5f, 0, 1.0f);
 	if (bHit)
 	{
 		DrawDebugSphere(GetWorld(), End, 8.0f, 8, FColor::Red, false, 0.5f);

@@ -165,6 +165,10 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
 	TObjectPtr<UChildActorComponent> WeaponChildThirdPerson;
 
+	/** Third-person secondary (akimbo) weapon mount, attached to the mesh's left-hand socket. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
+	TObjectPtr<UChildActorComponent> WeaponChildSecondaryThirdPerson;
+
 	/** Mapping context applied to the local player on possession. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
 	TObjectPtr<UInputMappingContext> DefaultMappingContext;
