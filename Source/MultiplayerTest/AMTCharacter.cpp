@@ -225,11 +225,19 @@ void AAMTCharacter::DropPrimaryWeapon()
 
 void AAMTCharacter::RefreshWeaponVisibility()
 {
-	auto Apply = [](UChildActorComponent* Comp, bool bOnlyOwnerSee, bool bOwnerNoSee)
+	// UChildActorComponent doesn't reliably set the spawned actor's Owner to its outer actor — and
+	// bOwnerNoSee / bOnlyOwnerSee are evaluated at render time using the primitive actor's Owner vs
+	// the local PlayerController's controlled pawn. If Owner is wrong, the flags silently no-op.
+	// Explicitly setting Owner = this character makes the engine see the FP/3P split correctly.
+	auto Apply = [this](UChildActorComponent* Comp, bool bOnlyOwnerSee, bool bOwnerNoSee)
 	{
 		if (!Comp) return;
 		AActor* Child = Comp->GetChildActor();
 		if (!Child) return;
+		if (Child->GetOwner() != this)
+		{
+			Child->SetOwner(this);
+		}
 		TArray<UPrimitiveComponent*> Prims;
 		Child->GetComponents<UPrimitiveComponent>(Prims);
 		for (UPrimitiveComponent* Prim : Prims)
