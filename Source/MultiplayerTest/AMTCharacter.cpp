@@ -123,15 +123,17 @@ void AAMTCharacter::BeginPlay()
 		}
 	}
 
-	// Capture base mount positions for weapon sway. Done after the mirror above so the secondary's base
+	// Capture base mount transforms for weapon sway. Done after the mirror above so the secondary's base
 	// reflects its mirrored position. Sway adds offsets on top of these without losing the BP-tuned origin.
 	if (WeaponChild)
 	{
 		PrimaryBaseLocation = WeaponChild->GetRelativeLocation();
+		PrimaryBaseRotation = WeaponChild->GetRelativeRotation();
 	}
 	if (WeaponChildSecondary)
 	{
 		SecondaryBaseLocation = WeaponChildSecondary->GetRelativeLocation();
+		SecondaryBaseRotation = WeaponChildSecondary->GetRelativeRotation();
 	}
 
 	RefreshWeaponVisibility();
@@ -264,7 +266,8 @@ void AAMTCharacter::Tick(float DeltaTime)
 	// Speed-scaled walk bob: amplitude ramps up with movement speed, frequency speeds up too.
 	const UCharacterMovementComponent* CMC = GetCharacterMovement();
 	const float MaxSpeed = CMC ? CMC->MaxWalkSpeed : 600.0f;
-	const float CurSpeed = GetVelocity().Size2D();
+	const FVector WorldVelocity = GetVelocity();
+	const float CurSpeed = WorldVelocity.Size2D();
 	const float SpeedRatio = FMath::Clamp(CurSpeed / FMath::Max(MaxSpeed, 1.0f), 0.0f, 1.0f);
 
 	BobTimeAccumulator += DeltaTime * WeaponBobFrequency * (0.5f + 0.5f * SpeedRatio);
@@ -280,27 +283,58 @@ void AAMTCharacter::Tick(float DeltaTime)
 	const float IdleY = FMath::Sin(IdleTimeAccumulator * 0.8f) * IdleAmp;
 	const float IdleZ = FMath::Sin(IdleTimeAccumulator * 1.5f) * IdleAmp * 0.7f;
 
-	// Look sway: lag behind controller rotation deltas, then ease back
+	// Spring-damper integrator: target = where we want, position+velocity advance physically.
+	// Force = stiffness * (target - position) - damping * velocity. v += F*dt; p += v*dt.
+	auto SpringStep = [](FVector& Position, FVector& Velocity, const FVector& Target, float Stiffness, float Damping, float dt)
+	{
+		const FVector Force = (Target - Position) * Stiffness - Velocity * Damping;
+		Velocity += Force * dt;
+		Position += Velocity * dt;
+	};
+
+	// === Velocity inertia: weapon trails behind acceleration, overshoots forward when stopping. ===
+	// Local-space velocity (so forward/strafe are along character's facing, not world axes).
+	const FVector LocalVelocity = GetActorTransform().InverseTransformVector(WorldVelocity);
+	const FVector InertiaTarget = -LocalVelocity * WeaponInertiaScale;
+	SpringStep(WeaponInertiaCurrent, WeaponInertiaVelocity, InertiaTarget, WeaponInertiaStiffness, WeaponInertiaDamping, DeltaTime);
+
+	// === Look sway: spring-damper instead of simple lerp. Gives natural overshoot+settle on snap-aim. ===
 	const APlayerController* PC = Cast<APlayerController>(GetController());
 	const FRotator CurRot = PC ? PC->GetControlRotation() : FRotator::ZeroRotator;
 	const FRotator RotDelta = (CurRot - LastControlRotation).GetNormalized();
 	LastControlRotation = CurRot;
 
-	const FVector SwayTarget(0.0f, -RotDelta.Yaw * WeaponSwayLookAmount, -RotDelta.Pitch * WeaponSwayLookAmount);
-	SwayCurrentOffset = FMath::VInterpTo(SwayCurrentOffset, SwayTarget, DeltaTime, WeaponSwayInterpSpeed);
+	const FVector LookSwayTarget(0.0f, -RotDelta.Yaw * WeaponSwayLookAmount, -RotDelta.Pitch * WeaponSwayLookAmount);
+	SpringStep(LookSwayCurrent, LookSwayVelocity, LookSwayTarget, LookSwayStiffness, LookSwayDamping, DeltaTime);
 
+	// === Strafe roll: weapon tilts opposite strafe direction. ===
+	const float StrafeRollDeg = -LocalVelocity.Y * StrafeRollFactor;
+
+	// === Landing jolt: detect airborne→grounded transition, kick weapon down, decay. ===
+	if (bWasInAirLastFrame && !bIsInAir)
+	{
+		LandingJoltCurrent = LandingJoltMagnitude;
+	}
+	LandingJoltCurrent = FMath::FInterpTo(LandingJoltCurrent, 0.0f, DeltaTime, LandingJoltDecaySpeed);
+	bWasInAirLastFrame = bIsInAir;
+
+	// Combine all sources into a single offset applied to the weapon mount.
 	const FVector Offset(
-		IdleX,
-		BobH + IdleY + SwayCurrentOffset.Y,
-		BobV + IdleZ + SwayCurrentOffset.Z);
+		IdleX + WeaponInertiaCurrent.X,
+		BobH + IdleY + LookSwayCurrent.Y + WeaponInertiaCurrent.Y,
+		BobV + IdleZ + LookSwayCurrent.Z + WeaponInertiaCurrent.Z - LandingJoltCurrent);
+
+	const FRotator RollDelta(0.0f, 0.0f, StrafeRollDeg);
 
 	if (WeaponChild)
 	{
 		WeaponChild->SetRelativeLocation(PrimaryBaseLocation + Offset);
+		WeaponChild->SetRelativeRotation(PrimaryBaseRotation + RollDelta);
 	}
 	if (WeaponChildSecondary)
 	{
 		WeaponChildSecondary->SetRelativeLocation(SecondaryBaseLocation + Offset);
+		WeaponChildSecondary->SetRelativeRotation(SecondaryBaseRotation + RollDelta);
 	}
 }
 

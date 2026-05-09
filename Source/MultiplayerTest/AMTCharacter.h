@@ -64,6 +64,42 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
 	float WeaponIdleSwayAmplitude = 0.4f;
 
+	// === Spring-damper polish (STRAFTAT/Cruelty Squad feel) ===
+	// Look sway uses a critically-damped spring instead of simple lerp; velocity inertia trails movement;
+	// strafe roll tilts on lateral velocity; landing jolt pushes weapon down on touchdown.
+
+	/** How much the weapon trails behind movement velocity. Higher = more visible inertia. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float WeaponInertiaScale = 0.05f;
+
+	/** Spring stiffness for the inertia trail. Higher = catches up to movement faster. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float WeaponInertiaStiffness = 30.0f;
+
+	/** Spring damping for the inertia trail. Higher = less overshoot when stopping. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float WeaponInertiaDamping = 8.0f;
+
+	/** Spring stiffness for look sway (replaces simple lerp). Higher = snappier response, less swimmy. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float LookSwayStiffness = 60.0f;
+
+	/** Spring damping for look sway. Lower = more overshoot/oscillation; higher = smoother settle. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float LookSwayDamping = 12.0f;
+
+	/** Roll degrees per cm/s of strafe velocity. Tilts weapon opposite strafe direction. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float StrafeRollFactor = 0.005f;
+
+	/** Downward kick magnitude (cm) on landing from airborne. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.0"))
+	float LandingJoltMagnitude = 4.0f;
+
+	/** How fast the landing jolt decays back to zero. Higher = quicker recovery. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.1"))
+	float LandingJoltDecaySpeed = 8.0f;
+
 	/** Server-only. Tries to put the given weapon class into primary (if empty) then secondary. Returns true on success. */
 	bool TryEquipWeapon(TSubclassOf<AMTWeapon> NewWeaponClass);
 
@@ -194,10 +230,20 @@ protected:
 	// Weapon sway state — local-only, captured from BP-overridden mount transforms in BeginPlay
 	FVector PrimaryBaseLocation = FVector::ZeroVector;
 	FVector SecondaryBaseLocation = FVector::ZeroVector;
+	FRotator PrimaryBaseRotation = FRotator::ZeroRotator;
+	FRotator SecondaryBaseRotation = FRotator::ZeroRotator;
 	float BobTimeAccumulator = 0.0f;
 	float IdleTimeAccumulator = 0.0f;
 	FVector SwayCurrentOffset = FVector::ZeroVector;
 	FRotator LastControlRotation = FRotator::ZeroRotator;
+
+	// Spring-damper integration state (position + velocity for each weighted offset)
+	FVector WeaponInertiaCurrent = FVector::ZeroVector;
+	FVector WeaponInertiaVelocity = FVector::ZeroVector;
+	FVector LookSwayCurrent = FVector::ZeroVector;
+	FVector LookSwayVelocity = FVector::ZeroVector;
+	float LandingJoltCurrent = 0.0f;
+	bool bWasInAirLastFrame = false;
 
 	/** Refresh BlueprintReadOnly anim-state vars (Speed, ForwardSpeed, AimPitch, bIsInAir, etc.). Runs on all instances. */
 	void UpdateAnimationState();
