@@ -8,6 +8,7 @@
 
 class USkeletalMesh;
 class UAnimInstance;
+class UAnimMontage;
 class UTexture2D;
 
 /**
@@ -47,4 +48,9 @@ public:
 	/** Uniform scale to apply to the mesh component. Use to compensate for FBX scale mismatches without re-exporting. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Character|Mesh", meta = (ClampMin = "0.01"))
 	float MeshUniformScale = 1.0f;
+
+	/** Emote / dance anim montage played when the player triggers the Emote input. Authored on the character's
+	 *  own skeleton — each character has its own per-skeleton montage. Optional; if null, Emote does nothing. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Character|Emote")
+	TSoftObjectPtr<UAnimMontage> EmoteMontage;
 };

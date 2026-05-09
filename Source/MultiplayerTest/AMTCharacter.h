@@ -10,6 +10,7 @@ class UCameraComponent;
 class UChildActorComponent;
 class UInputMappingContext;
 class UInputAction;
+class UAnimMontage;
 class AMTWeapon;
 class AMTWeaponPickup;
 class UMTCharacterDefinition;
@@ -194,6 +195,26 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
 	TObjectPtr<UInputAction> SprintAction;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
+	TObjectPtr<UInputAction> EmoteAction;
+
+	// === Emote (Fortnite-style: triggers dance montage + switches camera to 3P for the duration) ===
+
+	/** Camera back-offset (cm) from the head while emoting — pulls view behind the character. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Emote", meta = (ClampMin = "0.0"))
+	float EmoteCameraBackDistance = 200.0f;
+
+	/** Camera up-offset (cm) added on top of the back-offset while emoting. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Emote")
+	float EmoteCameraUpOffset = 80.0f;
+
+	/** How fast the camera lerps between FP and 3P-emote positions. Higher = snappier transition. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Emote", meta = (ClampMin = "0.1"))
+	float EmoteCameraInterpSpeed = 6.0f;
+
+	UPROPERTY(ReplicatedUsing = OnRep_IsEmoting, BlueprintReadOnly, Category = "Emote")
+	bool bIsEmoting = false;
+
 	/** MaxWalkSpeed while the sprint key is held. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement", meta = (ClampMin = "0.0"))
 	float SprintSpeed = 1100.0f;
@@ -210,6 +231,23 @@ protected:
 	void ToggleMenu();
 	void StartSprint();
 	void StopSprint();
+
+	void Emote();
+
+	UFUNCTION(Server, Reliable)
+	void ServerStartEmote();
+
+	UFUNCTION(Server, Reliable)
+	void ServerStopEmote();
+
+	UFUNCTION()
+	void OnRep_IsEmoting();
+
+	void StopEmote();
+
+	/** Cached montage from the active CharacterDefinition. Set in ApplyCharacterDefinition. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> CachedEmoteMontage = nullptr;
 
 	UFUNCTION(Server, Reliable)
 	void ServerSetSprint(bool bSprinting);

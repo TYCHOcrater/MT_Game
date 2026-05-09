@@ -269,10 +269,13 @@ void AAMTCharacter::RefreshWeaponVisibility()
 	};
 
 	// FP weapons: only owner sees (camera-attached). 3P weapons: only non-owner sees (body-attached).
-	Apply(WeaponChild,                     /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ false);
-	Apply(WeaponChildSecondary,            /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ false);
-	Apply(WeaponChildThirdPerson,          /*bOnlyOwnerSee*/ false, /*bOwnerNoSee*/ true);
-	Apply(WeaponChildSecondaryThirdPerson, /*bOnlyOwnerSee*/ false, /*bOwnerNoSee*/ true);
+	// During emote, hide FP weapons (camera goes to 3P, FP weapons would clip awkwardly) but show 3P
+	// weapons to the owner too (they're now in 3P view of their own dancing character — gun-in-hand fits).
+	const bool bEmoting = bIsEmoting;
+	Apply(WeaponChild,                     /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ bEmoting);
+	Apply(WeaponChildSecondary,            /*bOnlyOwnerSee*/ true,  /*bOwnerNoSee*/ bEmoting);
+	Apply(WeaponChildThirdPerson,          /*bOnlyOwnerSee*/ false, /*bOwnerNoSee*/ !bEmoting);
+	Apply(WeaponChildSecondaryThirdPerson, /*bOnlyOwnerSee*/ false, /*bOwnerNoSee*/ !bEmoting);
 }
 
 // Called every frame
@@ -287,10 +290,49 @@ void AAMTCharacter::Tick(float DeltaTime)
 	// Idempotent re-apply of weapon visibility (handles late-replicated child actors).
 	RefreshWeaponVisibility();
 
+	// Emote loop — runs on every instance (server + each client) since each plays its own local montage
+	// via OnRep_IsEmoting. If the montage ends naturally and we're still in the emote state (because the
+	// asset's section "Next Section" isn't self-looping), restart it locally. Cancelled by Move/Fire/Jump/G
+	// via ServerStopEmote, which clears bIsEmoting and prevents re-trigger here.
+	if (bIsEmoting && CachedEmoteMontage)
+	{
+		if (UAnimInstance* AnimInstance = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr)
+		{
+			if (!AnimInstance->Montage_IsPlaying(CachedEmoteMontage))
+			{
+				PlayAnimMontage(CachedEmoteMontage);
+			}
+		}
+	}
+
 	// Weapon sway is purely a local first-person feel effect — skip on remote pawns and the server's view of clients.
 	if (!IsLocallyControlled() || !FirstPersonCamera)
 	{
 		return;
+	}
+
+	// Emote camera: during emote, the camera ORBITS around the character (moves in a circle, always
+	// looking at the body) based on controller yaw delta from the now-stationary capsule. Outside
+	// emote, camera returns to normal FP position. Lerp covers both transitions smoothly.
+	{
+		const FVector NormalCamLoc(0.0f, 0.0f, 64.0f);
+		FVector TargetCamLoc;
+		if (bIsEmoting && Controller)
+		{
+			// Capsule isn't yawing during emote (bUseControllerRotationYaw was set false), so the
+			// controller's yaw delta from the capsule's frozen yaw drives the orbit angle.
+			const float CapsuleYaw = GetCapsuleComponent()->GetComponentRotation().Yaw;
+			const float ControlYaw = Controller->GetControlRotation().Yaw;
+			const FRotator OrbitRot(0.0f, ControlYaw - CapsuleYaw, 0.0f);
+			const FVector OrbitOffset = OrbitRot.RotateVector(FVector(-EmoteCameraBackDistance, 0.0f, 0.0f));
+			TargetCamLoc = OrbitOffset + FVector(0.0f, 0.0f, 64.0f + EmoteCameraUpOffset);
+		}
+		else
+		{
+			TargetCamLoc = NormalCamLoc;
+		}
+		const FVector CurCamLoc = FirstPersonCamera->GetRelativeLocation();
+		FirstPersonCamera->SetRelativeLocation(FMath::VInterpTo(CurCamLoc, TargetCamLoc, DeltaTime, EmoteCameraInterpSpeed));
 	}
 
 	// Speed-scaled walk bob: amplitude ramps up with movement speed, frequency speeds up too.
@@ -502,6 +544,81 @@ void AAMTCharacter::ApplyCharacterDefinition(UMTCharacterDefinition* Def)
 	MeshComp->SetRelativeLocation(Def->MeshRelativeLocation);
 	MeshComp->SetRelativeRotation(Def->MeshRelativeRotation);
 	MeshComp->SetRelativeScale3D(FVector(Def->MeshUniformScale));
+
+	// Cache the per-character emote montage for ServerStartEmote to play. Synchronous load is fine here
+	// — possession is a rare event and the montage is small.
+	CachedEmoteMontage = Def->EmoteMontage.LoadSynchronous();
+}
+
+void AAMTCharacter::Emote()
+{
+	// G is a toggle: if already emoting, stop. Otherwise start.
+	if (bIsEmoting)
+	{
+		ServerStopEmote();
+	}
+	else
+	{
+		ServerStartEmote();
+	}
+}
+
+void AAMTCharacter::ServerStartEmote_Implementation()
+{
+	// Already emoting, or no montage configured for this character → nothing to do.
+	if (bIsEmoting || !CachedEmoteMontage)
+	{
+		return;
+	}
+
+	bIsEmoting = true;
+	// OnRep_IsEmoting fires automatically on clients via the ReplicatedUsing notify; manually invoke
+	// it on server (or listen-server's local view) to drive the same camera/visibility/montage logic.
+	OnRep_IsEmoting();
+}
+
+void AAMTCharacter::ServerStopEmote_Implementation()
+{
+	StopEmote();
+}
+
+void AAMTCharacter::StopEmote()
+{
+	if (!HasAuthority() || !bIsEmoting)
+	{
+		return;
+	}
+	bIsEmoting = false;
+	OnRep_IsEmoting();
+}
+
+void AAMTCharacter::OnRep_IsEmoting()
+{
+	// Show our own body to ourselves while emoting (normally hidden by SetOwnerNoSee in the ctor).
+	// Weapon visibility is handled in RefreshWeaponVisibility (which runs every tick and reads bIsEmoting).
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		MeshComp->SetOwnerNoSee(!bIsEmoting);
+	}
+
+	// Decouple body yaw from controller during emote. The camera still rotates with controller (its own
+	// bUsePawnControlRotation flag reads control rotation directly), so the player can orbit around their
+	// stationary dancing character. Restored when emote ends — character will snap back to controller yaw.
+	bUseControllerRotationYaw = !bIsEmoting;
+
+	// Drive the montage from OnRep so every client (including the originator, who's skipped by
+	// ACharacter's ReplicatedAnimMontage owner-skip) plays/stops the dance locally.
+	if (bIsEmoting)
+	{
+		if (CachedEmoteMontage)
+		{
+			PlayAnimMontage(CachedEmoteMontage);
+		}
+	}
+	else
+	{
+		StopAnimMontage(CachedEmoteMontage);
+	}
 }
 
 void AAMTCharacter::Move(const FInputActionValue& Value)
@@ -510,6 +627,12 @@ void AAMTCharacter::Move(const FInputActionValue& Value)
 	if (!Controller || Axis.IsNearlyZero())
 	{
 		return;
+	}
+
+	// Movement input cancels any active emote — player intent overrides the dance.
+	if (bIsEmoting)
+	{
+		ServerStopEmote();
 	}
 
 	const FRotator YawRotation(0.0f, Controller->GetControlRotation().Yaw, 0.0f);
@@ -528,6 +651,10 @@ void AAMTCharacter::Look(const FInputActionValue& Value)
 
 void AAMTCharacter::StartJump()
 {
+	if (bIsEmoting)
+	{
+		ServerStopEmote();
+	}
 	Jump();
 }
 
@@ -541,6 +668,12 @@ void AAMTCharacter::Fire()
 	if (!FirstPersonCamera)
 	{
 		return;
+	}
+
+	// Firing cancels any active emote — same intent-override as movement.
+	if (bIsEmoting)
+	{
+		ServerStopEmote();
 	}
 
 	const FVector Start = FirstPersonCamera->GetComponentLocation();
@@ -757,6 +890,10 @@ void AAMTCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 			EIC->BindAction(SprintAction, ETriggerEvent::Started, this, &AAMTCharacter::StartSprint);
 			EIC->BindAction(SprintAction, ETriggerEvent::Completed, this, &AAMTCharacter::StopSprint);
 		}
+		if (EmoteAction)
+		{
+			EIC->BindAction(EmoteAction, ETriggerEvent::Started, this, &AAMTCharacter::Emote);
+		}
 	}
 }
 
@@ -764,6 +901,7 @@ void AAMTCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AAMTCharacter, Health);
+	DOREPLIFETIME(AAMTCharacter, bIsEmoting);
 }
 
 float AAMTCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
