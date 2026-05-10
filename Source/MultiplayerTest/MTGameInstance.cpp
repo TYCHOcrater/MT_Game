@@ -4,6 +4,7 @@
 #include "AMTCharacter.h"
 #include "MTPlayerState.h"
 #include "MTCharacterRegistry.h"
+#include "MTCharacterDefinition.h"
 #include "OnlineSubsystem.h"
 #include "OnlineSessionSettings.h"
 #include "Interfaces/OnlineSessionInterface.h"
@@ -472,6 +473,41 @@ void UMTGameInstance::ShowMainMenu()
 				return FReply::Handled();
 			})
 		];
+	}
+
+	// Character cycle button — only show when registry has more than 1 character.
+	if (const UMTCharacterRegistry* Registry = UMTCharacterRegistry::Get())
+	{
+		if (Registry->Num() > 1)
+		{
+			FString CurrentName = TEXT("?");
+			if (UMTCharacterDefinition* CurrentDef = Registry->LoadDefinition(PreferredCharacterIndex))
+			{
+				CurrentName = CurrentDef->DisplayName.ToString();
+				if (CurrentName.IsEmpty())
+				{
+					CurrentName = CurrentDef->CharacterId.ToString();
+				}
+			}
+
+			ButtonStack->AddSlot().AutoHeight().Padding(8).HAlign(HAlign_Fill)
+			[
+				MakeButton(FString::Printf(TEXT("Character: %s  (click to cycle)"), *CurrentName), [this]()
+				{
+					const UMTCharacterRegistry* Reg = UMTCharacterRegistry::Get();
+					if (!Reg || Reg->Num() <= 1)
+					{
+						return FReply::Handled();
+					}
+					const uint8 NextIndex = (PreferredCharacterIndex + 1) % Reg->Num();
+					SetPreferredCharacterIndex(NextIndex);
+					// Rebuild the menu so the button label reflects the new character name.
+					HideMainMenu();
+					ShowMainMenu();
+					return FReply::Handled();
+				})
+			];
+		}
 	}
 
 	ButtonStack->AddSlot().AutoHeight().Padding(8).HAlign(HAlign_Fill)
