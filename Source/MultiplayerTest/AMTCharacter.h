@@ -233,6 +233,34 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
 	TObjectPtr<UInputAction> SlideAction;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
+	TObjectPtr<UInputAction> MeleeAction;
+
+	// === Melee / FP arms ===
+
+	/** FP arms mesh attached to the camera — shows hand+forearm in front of view when unarmed.
+	 *  Set to the character's own mesh in ApplyCharacterDefinition; an FP-only ABP bone-masks
+	 *  to display arms only. Visible to owner only. Hidden when WeaponChild has a weapon equipped. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Combat")
+	TObjectPtr<USkeletalMeshComponent> FPArmsMesh;
+
+	/** Anim class to drive FPArmsMesh — typically a small ABP that plays a bone-masked punch-windup
+	 *  idle and a punch montage on trigger. Authored in editor on the character's skeleton. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat")
+	TSubclassOf<UAnimInstance> FPArmsAnimClass;
+
+	/** Melee trace range in cm — short, just past the visible fist. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee", meta = (ClampMin = "0.0"))
+	float MeleeRange = 180.0f;
+
+	/** Damage dealt by a successful punch. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee", meta = (ClampMin = "0.0"))
+	float MeleeDamage = 35.0f;
+
+	/** Cooldown (s) between melee attempts — driven by montage duration usually but capped here. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Melee", meta = (ClampMin = "0.0"))
+	float MeleeCooldown = 0.6f;
+
 	// === Lean ===
 
 	/** Camera roll (degrees) at full lean — both directions. */
@@ -316,6 +344,23 @@ protected:
 
 	UFUNCTION()
 	void OnRep_IsSliding();
+
+	void Melee();
+
+	UFUNCTION(Server, Reliable)
+	void ServerMelee(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction);
+
+	UFUNCTION(NetMulticast, Reliable)
+	void MulticastPlayPunch();
+
+	/** Hide FPArmsMesh when a weapon is equipped, show when unarmed. Called from Tick — cheap. */
+	void RefreshFPArmsVisibility();
+
+	/** Cached montage from the active CharacterDefinition.PunchMontage. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> CachedPunchMontage = nullptr;
+
+	float LastMeleeTime = -1000.0f;
 
 	UFUNCTION(Server, Reliable)
 	void ServerStartEmote();

@@ -67,6 +67,20 @@ AAMTCharacter::AAMTCharacter()
 	WeaponChildSecondaryThirdPerson->SetupAttachment(GetMesh(), TEXT("weapon_socket_l"));
 	WeaponChildSecondaryThirdPerson->SetIsReplicated(true);
 
+	// FP arms mesh attached to camera, shows the character's hands+forearms when unarmed. Owner-only-see
+	// so it doesn't show to remote viewers (they see the TPP body mesh). Driven by FPArmsAnimClass — a
+	// small ABP that outputs a punch-windup pose (paused/explicit-time on the punch sequence) by default.
+	// Position/scale tuned in BP_MTCharacter — these are sensible defaults but characters with different
+	// proportions may need adjustments via the component's Transform in the BP.
+	FPArmsMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FPArmsMesh"));
+	FPArmsMesh->SetupAttachment(FirstPersonCamera);
+	FPArmsMesh->SetOnlyOwnerSee(true);
+	FPArmsMesh->SetCastShadow(false);
+	FPArmsMesh->SetVisibility(false);  // hidden until ApplyCharacterDefinition + weapon-state allows
+	// Default: pelvis ~40cm below camera, body extending below+behind, arms at camera level reaching forward.
+	FPArmsMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -40.0f));
+	FPArmsMesh->SetRelativeRotation(FRotator(0.0f, -90.0f, 0.0f));
+
 	// FPS-style rotation: camera follows controller yaw
 	bUseControllerRotationYaw = true;
 	bUseControllerRotationPitch = false;
@@ -293,6 +307,9 @@ void AAMTCharacter::Tick(float DeltaTime)
 
 	// Idempotent re-apply of weapon visibility (handles late-replicated child actors).
 	RefreshWeaponVisibility();
+
+	// FP arms visibility — shown when no weapon equipped (so player sees their hands ready to punch).
+	RefreshFPArmsVisibility();
 
 	// Server-only spread decay — pulls CurrentSpreadDeg back toward the base angle when not firing.
 	if (HasAuthority() && CurrentSpreadDeg > SpreadBaseAngleDeg)
@@ -586,6 +603,36 @@ void AAMTCharacter::ApplyCharacterDefinition(UMTCharacterDefinition* Def)
 	// Cache the per-character emote montage for ServerStartEmote to play. Synchronous load is fine here
 	// — possession is a rare event and the montage is small.
 	CachedEmoteMontage = Def->EmoteMontage.LoadSynchronous();
+	CachedPunchMontage = Def->PunchMontage.LoadSynchronous();
+
+	// Assign the FP arms mesh to the character's own SkeletalMesh + the FP-only AnimBP. Same skeletal
+	// mesh as the body — we hide non-arm bones below so only arms+hands render in the FP view.
+	if (FPArmsMesh)
+	{
+		if (USkeletalMesh* SK = Def->Mesh.LoadSynchronous())
+		{
+			FPArmsMesh->SetSkeletalMesh(SK);
+		}
+		if (FPArmsAnimClass)
+		{
+			FPArmsMesh->SetAnimInstanceClass(FPArmsAnimClass);
+		}
+		// Scale per-character so each looks right in FP. Location/Rotation set in ctor; can be overridden
+		// in BP_MTCharacter component for fine-tuning per project.
+		FPArmsMesh->SetRelativeScale3D(FVector(Def->MeshUniformScale));
+
+		// Bone-hide the non-arm parts of the FP mesh so head and legs don't poke into the FP camera.
+		// (Spine bones are ancestors of arms so we can't hide them without losing arms; we rely on the
+		// position offset in BP_MTCharacter to keep torso mostly behind camera.)
+		static const FName HideBones[] = { TEXT("head"), TEXT("thigh_l"), TEXT("thigh_r") };
+		for (const FName& BoneName : HideBones)
+		{
+			if (FPArmsMesh->GetBoneIndex(BoneName) != INDEX_NONE)
+			{
+				FPArmsMesh->HideBoneByName(BoneName, EPhysBodyOp::PBO_None);
+			}
+		}
+	}
 }
 
 void AAMTCharacter::Emote()
@@ -724,6 +771,91 @@ void AAMTCharacter::OnRep_IsSliding()
 	// Hook for ABP / camera height changes etc. — currently no visual side effect.
 }
 
+// === Melee ===
+
+void AAMTCharacter::Melee()
+{
+	// Local cooldown — server also clamps via LastMeleeTime.
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastMeleeTime < MeleeCooldown)
+	{
+		return;
+	}
+	LastMeleeTime = Now;
+
+	// Use camera forward as the trace direction; server applies damage authoritatively.
+	if (!FirstPersonCamera)
+	{
+		return;
+	}
+	const FVector Start = FirstPersonCamera->GetComponentLocation();
+	const FVector Dir = FirstPersonCamera->GetForwardVector();
+	ServerMelee(Start, Dir);
+
+	// Play punch on FP arms locally for immediate feedback (server will multicast for TPP body anim).
+	if (CachedPunchMontage && FPArmsMesh)
+	{
+		if (UAnimInstance* AI = FPArmsMesh->GetAnimInstance())
+		{
+			AI->Montage_Play(CachedPunchMontage);
+		}
+	}
+}
+
+void AAMTCharacter::ServerMelee_Implementation(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction)
+{
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastMeleeTime < MeleeCooldown)
+	{
+		return;
+	}
+	LastMeleeTime = Now;
+
+	// Short-range trace from camera. Hits the first pawn-collider, applies MeleeDamage.
+	const FVector End = (FVector)Start + (FVector)Direction * MeleeRange;
+	FHitResult Hit;
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(this);
+	const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Pawn, Params);
+	if (bHit)
+	{
+		if (AAMTCharacter* Victim = Cast<AAMTCharacter>(Hit.GetActor()))
+		{
+			if (!Victim->IsDead())
+			{
+				FPointDamageEvent DamageEvent(MeleeDamage, Hit, Direction, nullptr);
+				Victim->TakeDamage(MeleeDamage, DamageEvent, GetController(), this);
+				MulticastShowDamageNumber(FVector_NetQuantize(Hit.ImpactPoint), FMath::RoundToInt(MeleeDamage), false);
+			}
+		}
+	}
+
+	// Body punch anim — broadcasts so all clients (and the server) play the montage on the TPP mesh.
+	// (FP arms montage is played client-side in Melee() so the puncher sees their own swing immediately.)
+	MulticastPlayPunch();
+}
+
+void AAMTCharacter::MulticastPlayPunch_Implementation()
+{
+	if (CachedPunchMontage)
+	{
+		PlayAnimMontage(CachedPunchMontage);
+	}
+}
+
+void AAMTCharacter::RefreshFPArmsVisibility()
+{
+	if (!FPArmsMesh) return;
+	// Show FP arms when not holding a weapon. WeaponChild's child actor class != null means equipped.
+	const bool bHaveWeapon = WeaponChild && WeaponChild->GetChildActorClass() != nullptr;
+	const bool bShouldShow = !bHaveWeapon;
+	if (FPArmsMesh->IsVisible() != bShouldShow)
+	{
+		FPArmsMesh->SetVisibility(bShouldShow, /*bPropagate*/ true);
+	}
+
+}
+
 void AAMTCharacter::OnRep_IsEmoting()
 {
 	// Show our own body to ourselves while emoting (normally hidden by SetOwnerNoSee in the ctor).
@@ -806,6 +938,14 @@ void AAMTCharacter::Fire()
 	if (bIsEmoting)
 	{
 		ServerStopEmote();
+	}
+
+	// If unarmed, LMB punches instead of fires. No-weapon means WeaponChild has no equipped class.
+	const bool bHaveWeapon = WeaponChild && WeaponChild->GetChildActorClass() != nullptr;
+	if (!bHaveWeapon)
+	{
+		Melee();
+		return;
 	}
 
 	const FVector Start = FirstPersonCamera->GetComponentLocation();
@@ -1084,6 +1224,10 @@ void AAMTCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 		{
 			EIC->BindAction(SlideAction, ETriggerEvent::Started, this, &AAMTCharacter::StartSlide);
 		}
+		if (MeleeAction)
+		{
+			EIC->BindAction(MeleeAction, ETriggerEvent::Started, this, &AAMTCharacter::Melee);
+		}
 	}
 }
 
@@ -1192,8 +1336,8 @@ void AAMTCharacter::HandleDeath(AController* Killer)
 		DeadController->UnPossess();
 	}
 
-	// Despawn the corpse after a short delay
-	SetLifeSpan(2.0f);
+	// Despawn the corpse after enough time for the ragdoll to settle visually.
+	SetLifeSpan(6.0f);
 
 	TWeakObjectPtr<AController> WeakController(DeadController);
 	TWeakObjectPtr<UWorld> WeakWorld(World);
@@ -1216,12 +1360,31 @@ void AAMTCharacter::HandleDeath(AController* Killer)
 
 void AAMTCharacter::MulticastOnDeath_Implementation()
 {
+	// Stop the character controller — no input, no walk, capsule no longer collides.
 	GetCharacterMovement()->DisableMovement();
 	GetCapsuleComponent()->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	GetMesh()->SetSimulatePhysics(false);
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
 		PC->DisableInput(PC);
 	}
+
+	// Reveal own body to the owning player (we hid it via SetOwnerNoSee in the ctor) — now they
+	// get a third-person view of their own ragdoll instead of an invisible camera flyby.
+	GetMesh()->SetOwnerNoSee(false);
+
+	// Despawn carried weapons so they don't follow a flailing ragdoll. (Drop-on-crit may already
+	// have removed the primary; this catches the remaining slots cleanly.)
+	if (WeaponChild)                       WeaponChild->SetChildActorClass(nullptr);
+	if (WeaponChildSecondary)              WeaponChildSecondary->SetChildActorClass(nullptr);
+	if (WeaponChildThirdPerson)            WeaponChildThirdPerson->SetChildActorClass(nullptr);
+	if (WeaponChildSecondaryThirdPerson)   WeaponChildSecondaryThirdPerson->SetChildActorClass(nullptr);
+
+	// Ragdoll: hand the mesh over to physics. The PhysicsAsset on each character's SkeletalMesh
+	// provides the bone constraints + collision shapes; UE's built-in "Ragdoll" profile sets
+	// pawn-friendly collision channels (body collides with world, not with other pawns).
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	MeshComp->SetCollisionProfileName(TEXT("Ragdoll"));
+	MeshComp->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	MeshComp->SetSimulatePhysics(true);
 }
 

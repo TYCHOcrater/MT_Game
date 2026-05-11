@@ -53,4 +53,9 @@ public:
 	 *  own skeleton — each character has its own per-skeleton montage. Optional; if null, Emote does nothing. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Character|Emote")
 	TSoftObjectPtr<UAnimMontage> EmoteMontage;
+
+	/** Melee punch anim montage played when the player triggers Melee while unarmed. Authored on the
+	 *  character's own skeleton. Used both on FP arms and TPP body via ACharacter::PlayAnimMontage. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Character|Melee")
+	TSoftObjectPtr<UAnimMontage> PunchMontage;
 };
