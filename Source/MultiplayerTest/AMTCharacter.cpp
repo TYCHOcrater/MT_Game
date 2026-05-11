@@ -80,6 +80,10 @@ AAMTCharacter::AAMTCharacter()
 	Move->AirControl = 0.8f;
 	Move->GravityScale = 2.0f;
 	Move->BrakingDecelerationWalking = 2048.0f;
+	// Enable built-in crouch — used during slide to shrink the capsule so feet stay on ground
+	// while the crouch-pose anim plays. Uncrouch on slide-end is smooth + blocks if ceiling above.
+	Move->NavAgentProps.bCanCrouch = true;
+	Move->SetCrouchedHalfHeight(60.0f);
 
 	// Hide our own visible mesh from first-person view (still visible to other clients)
 	GetMesh()->SetOwnerNoSee(true);
@@ -290,6 +294,27 @@ void AAMTCharacter::Tick(float DeltaTime)
 	// Idempotent re-apply of weapon visibility (handles late-replicated child actors).
 	RefreshWeaponVisibility();
 
+	// Server-only spread decay — pulls CurrentSpreadDeg back toward the base angle when not firing.
+	if (HasAuthority() && CurrentSpreadDeg > SpreadBaseAngleDeg)
+	{
+		CurrentSpreadDeg = FMath::Max(SpreadBaseAngleDeg, CurrentSpreadDeg - SpreadRecoverDegPerSec * DeltaTime);
+	}
+
+	// Smooth LeanCurrent toward replicated LeanInputTarget on EVERY instance (server + each client).
+	// ABPs read LeanCurrent to drive TPP spine-bone bend — runs even on remote pawns who aren't locally controlled.
+	LeanCurrent = FMath::FInterpTo(LeanCurrent, LeanInputTarget, DeltaTime, LeanInterpSpeed);
+
+	// Server-only slide auto-end: exits when speed drops below threshold or max duration elapses.
+	if (HasAuthority() && bIsSliding)
+	{
+		const float SlideElapsed = GetWorld()->GetTimeSeconds() - SlideStartTime;
+		const float CurSpeed2D = GetVelocity().Size2D();
+		if (SlideElapsed >= SlideMaxDuration || CurSpeed2D < SlideEndSpeedThreshold)
+		{
+			EndSlide();
+		}
+	}
+
 	// Emote loop — runs on every instance (server + each client) since each plays its own local montage
 	// via OnRep_IsEmoting. If the montage ends naturally and we're still in the emote state (because the
 	// asset's section "Next Section" isn't self-looping), restart it locally. Cancelled by Move/Fire/Jump/G
@@ -333,6 +358,19 @@ void AAMTCharacter::Tick(float DeltaTime)
 		}
 		const FVector CurCamLoc = FirstPersonCamera->GetRelativeLocation();
 		FirstPersonCamera->SetRelativeLocation(FMath::VInterpTo(CurCamLoc, TargetCamLoc, DeltaTime, EmoteCameraInterpSpeed));
+	}
+
+	// FP lean: drive Roll on the controller's ControlRotation — the camera follows via
+	// bUsePawnControlRotation, so it rolls with the controller. AddLocalRotation on the camera
+	// wouldn't stick because the control-rotation override re-applies every frame.
+	// LeanCurrent is smoothed above for all instances; this block just applies the roll for the local owner.
+	{
+		if (APlayerController* PC = Cast<APlayerController>(GetController()))
+		{
+			FRotator CtrlRot = PC->GetControlRotation();
+			CtrlRot.Roll = LeanCurrent * LeanRollDegrees;
+			PC->SetControlRotation(CtrlRot);
+		}
 	}
 
 	// Speed-scaled walk bob: amplitude ramps up with movement speed, frequency speeds up too.
@@ -592,6 +630,100 @@ void AAMTCharacter::StopEmote()
 	OnRep_IsEmoting();
 }
 
+// === Lean ===
+// Local-only feel effect (FP-side): camera rolls + offsets laterally based on held keys.
+// LeanInputTarget is set discretely from key state (-1/0/+1); LeanCurrent is the smoothed value
+// applied to the camera in Tick. TPP spine rotation would need an anim post-process layer in the
+// ABP — not done yet, so others don't see the lean.
+
+void AAMTCharacter::ApplyLeanInputChange(float NewTarget)
+{
+	LeanInputTarget = NewTarget;
+	if (!HasAuthority())
+	{
+		ServerSetLeanInput(NewTarget);
+	}
+}
+
+void AAMTCharacter::LeanLeftPressed()  { bLeanLeftHeld = true;  ApplyLeanInputChange(bLeanRightHeld ? 0.0f : -1.0f); }
+void AAMTCharacter::LeanLeftReleased() { bLeanLeftHeld = false; ApplyLeanInputChange(bLeanRightHeld ?  1.0f :  0.0f); }
+void AAMTCharacter::LeanRightPressed()  { bLeanRightHeld = true;  ApplyLeanInputChange(bLeanLeftHeld ? 0.0f :  1.0f); }
+void AAMTCharacter::LeanRightReleased() { bLeanRightHeld = false; ApplyLeanInputChange(bLeanLeftHeld ? -1.0f :  0.0f); }
+
+void AAMTCharacter::ServerSetLeanInput_Implementation(float NewTarget)
+{
+	LeanInputTarget = FMath::Clamp(NewTarget, -1.0f, 1.0f);  // server clamps for safety
+}
+
+// === Slide ===
+// Detect on key press: if currently moving with non-trivial speed, kick a forward impulse and lower
+// ground friction so the player coasts. Uses bIsSliding (replicated) so remote viewers eventually
+// get a Crouch-style pose via ABP reading the flag (TBD wire up in ABP later).
+
+void AAMTCharacter::StartSlide()
+{
+	if (bIsSliding || !GetCharacterMovement())
+	{
+		return;
+	}
+	const float CurSpeed2D = GetVelocity().Size2D();
+	if (CurSpeed2D < 200.0f)  // need some forward momentum to slide
+	{
+		return;
+	}
+	ServerStartSlide();
+}
+
+void AAMTCharacter::ServerStartSlide_Implementation()
+{
+	if (bIsSliding || !GetCharacterMovement())
+	{
+		return;
+	}
+	UCharacterMovementComponent* CMC = GetCharacterMovement();
+
+	// Remember pre-slide values to restore on end.
+	PreSlideGroundFriction = CMC->GroundFriction;
+	PreSlideBrakingDecel   = CMC->BrakingDecelerationWalking;
+
+	CMC->GroundFriction = SlideGroundFriction;
+	CMC->BrakingDecelerationWalking = 200.0f;  // small braking so slide actually decays
+
+	// Forward impulse in the character's facing direction.
+	const FVector Forward = GetActorForwardVector();
+	CMC->Velocity = Forward * SlideImpulseSpeed + FVector(0, 0, CMC->Velocity.Z);
+
+	// Crouch so the capsule shrinks — character drops to ground level and the crouch-pose anim no
+	// longer leaves the feet hovering. CMC replicates crouch state automatically.
+	Crouch();
+
+	bIsSliding = true;
+	OnRep_IsSliding();  // ensure local listen-server runs the OnRep logic too
+	SlideStartTime = GetWorld()->GetTimeSeconds();
+}
+
+void AAMTCharacter::EndSlide()
+{
+	if (!HasAuthority() || !bIsSliding)
+	{
+		return;
+	}
+	if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+	{
+		CMC->GroundFriction = PreSlideGroundFriction;
+		CMC->BrakingDecelerationWalking = PreSlideBrakingDecel;
+	}
+	// UnCrouch is smooth and self-blocks if there's a ceiling above — won't pop the character through geometry.
+	UnCrouch();
+	bIsSliding = false;
+	OnRep_IsSliding();
+}
+
+void AAMTCharacter::OnRep_IsSliding()
+{
+	// Hook for ABP / camera height changes etc. — currently no visual side effect.
+}
+
 void AAMTCharacter::OnRep_IsEmoting()
 {
 	// Show our own body to ourselves while emoting (normally hidden by SetOwnerNoSee in the ctor).
@@ -679,6 +811,16 @@ void AAMTCharacter::Fire()
 	const FVector Start = FirstPersonCamera->GetComponentLocation();
 	const FVector Direction = FirstPersonCamera->GetForwardVector();
 	ServerFire(Start, Direction);
+
+	// Local-only camera kick — instant, no auto-recovery. Player compensates by aiming back down.
+	// Server doesn't need to know about this; it's purely a feel effect for the shooter's view.
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		FRotator Ctrl = PC->GetControlRotation();
+		Ctrl.Pitch -= RecoilVerticalKick;  // negative pitch = look up (UE convention)
+		Ctrl.Yaw   += FMath::FRandRange(-RecoilHorizontalKick, RecoilHorizontalKick);
+		PC->SetControlRotation(Ctrl);
+	}
 }
 
 void AAMTCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector_NetQuantizeNormal Direction)
@@ -704,11 +846,18 @@ void AAMTCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector
 	}
 	LastFireTime = Now;
 
-	// Both barrels point the same direction (camera forward). Single trace, both guns contribute damage independently.
+	// Apply bullet spread: randomize the direction within a cone whose half-angle is CurrentSpreadDeg.
+	// Server is authoritative for the spread roll — the client doesn't know which way the bullet veered.
+	// Then grow spread for next shot (capped). Tick decays it back toward base when not firing.
+	const float ConeRad = FMath::DegreesToRadians(FMath::Max(SpreadBaseAngleDeg, CurrentSpreadDeg));
+	const FVector SpreadDir = (ConeRad > KINDA_SMALL_NUMBER) ? FMath::VRandCone((FVector)Direction, ConeRad).GetSafeNormal() : (FVector)Direction;
+	CurrentSpreadDeg = FMath::Min(SpreadMaxAngleDeg, CurrentSpreadDeg + SpreadPerShotDeg);
+
+	// Both barrels point the same (spread-adjusted) direction. Single trace, both guns contribute damage independently.
 	const float TraceRange = FMath::Max(
 		Primary ? Primary->FireRange : 0.0f,
 		Secondary ? Secondary->FireRange : 0.0f);
-	const FVector End = (FVector)Start + (FVector)Direction * TraceRange;
+	const FVector End = (FVector)Start + SpreadDir * TraceRange;
 
 	FHitResult Hit;
 	FCollisionQueryParams Params;
@@ -749,6 +898,8 @@ void AAMTCharacter::ServerFire_Implementation(FVector_NetQuantize Start, FVector
 			Victim->bLastIncomingDamageWasCrit = bCrit;
 			FPointDamageEvent DamageEvent(Damage, Hit, Direction, nullptr);
 			Victim->TakeDamage(Damage, DamageEvent, GetController(), this);
+			// Show floating damage number at the hit point for everyone to see.
+			MulticastShowDamageNumber(FVector_NetQuantize(Hit.ImpactPoint), FMath::RoundToInt(Damage), bCrit);
 		};
 
 		ApplyShot(PrimaryShot.Key, PrimaryShot.Value);
@@ -800,6 +951,31 @@ void AAMTCharacter::MulticastFireFX_Implementation(FVector_NetQuantize Start, FV
 			}
 		}
 	}
+}
+
+void AAMTCharacter::MulticastShowDamageNumber_Implementation(FVector_NetQuantize Loc, int32 Damage, bool bWasCrit)
+{
+	// Per-client toggle: if this client's HUD has damage numbers disabled, skip drawing on this client.
+	if (UWorld* World = GetWorld())
+	{
+		if (APlayerController* LocalPC = World->GetFirstPlayerController())
+		{
+			if (AMTHUD* HUD = Cast<AMTHUD>(LocalPC->GetHUD()))
+			{
+				if (!HUD->bShowDamageNumbers)
+				{
+					return;
+				}
+			}
+		}
+	}
+
+	// Float a damage number at the impact point. Crit = red + "!N!", normal = yellow + "N".
+	// Uses DrawDebugString to match the existing MulticastFireFX debug-draw pattern; can be swapped for a
+	// proper UMG world-space widget later.
+	const FColor Color = bWasCrit ? FColor::Red : FColor::Yellow;
+	const FString Text = bWasCrit ? FString::Printf(TEXT("!%d!"), Damage) : FString::Printf(TEXT("%d"), Damage);
+	DrawDebugString(GetWorld(), (FVector)Loc + FVector(0.0f, 0.0f, 10.0f), Text, nullptr, Color, /*duration*/ 1.2f, /*bDrawShadow*/ true);
 }
 
 void AAMTCharacter::ToggleHUD()
@@ -894,6 +1070,20 @@ void AAMTCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 		{
 			EIC->BindAction(EmoteAction, ETriggerEvent::Started, this, &AAMTCharacter::Emote);
 		}
+		if (LeanLeftAction)
+		{
+			EIC->BindAction(LeanLeftAction, ETriggerEvent::Started,   this, &AAMTCharacter::LeanLeftPressed);
+			EIC->BindAction(LeanLeftAction, ETriggerEvent::Completed, this, &AAMTCharacter::LeanLeftReleased);
+		}
+		if (LeanRightAction)
+		{
+			EIC->BindAction(LeanRightAction, ETriggerEvent::Started,   this, &AAMTCharacter::LeanRightPressed);
+			EIC->BindAction(LeanRightAction, ETriggerEvent::Completed, this, &AAMTCharacter::LeanRightReleased);
+		}
+		if (SlideAction)
+		{
+			EIC->BindAction(SlideAction, ETriggerEvent::Started, this, &AAMTCharacter::StartSlide);
+		}
 	}
 }
 
@@ -902,6 +1092,8 @@ void AAMTCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AAMTCharacter, Health);
 	DOREPLIFETIME(AAMTCharacter, bIsEmoting);
+	DOREPLIFETIME(AAMTCharacter, bIsSliding);
+	DOREPLIFETIME(AAMTCharacter, LeanInputTarget);
 }
 
 float AAMTCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -914,6 +1106,19 @@ float AAMTCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEv
 	const float Applied = FMath::Min(Health, DamageAmount);
 	Health -= Applied;
 
+	// Tell the victim's local client which direction the attacker is in — HUD draws a directional
+	// damage indicator from this. Horizontal-plane direction is enough; ignore Z.
+	if (DamageCauser && DamageCauser != this)
+	{
+		FVector DirToAttacker = DamageCauser->GetActorLocation() - GetActorLocation();
+		DirToAttacker.Z = 0.0f;
+		DirToAttacker = DirToAttacker.GetSafeNormal();
+		if (!DirToAttacker.IsNearlyZero())
+		{
+			ClientShowDamageDirection(FVector_NetQuantizeNormal(DirToAttacker));
+		}
+	}
+
 	if (Health <= 0.0f)
 	{
 		Health = 0.0f;
@@ -921,6 +1126,17 @@ float AAMTCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEv
 	}
 
 	return Applied;
+}
+
+void AAMTCharacter::ClientShowDamageDirection_Implementation(FVector_NetQuantizeNormal AttackerDirWorld)
+{
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		if (AMTHUD* HUD = Cast<AMTHUD>(PC->GetHUD()))
+		{
+			HUD->ShowDamageDirection((FVector)AttackerDirWorld);
+		}
+	}
 }
 
 void AAMTCharacter::OnRep_Health()

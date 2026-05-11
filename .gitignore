@@ -4,6 +4,9 @@ Intermediate/
 DerivedDataCache/
 Saved/
 
+# Packaged build output — typically multi-GB, produced by RunUAT BuildCookRun
+Builds/
+
 # Plugin-level generated folders (in case you add plugins later)
 Plugins/*/Binaries/
 Plugins/*/Intermediate/

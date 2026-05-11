@@ -2,6 +2,8 @@
 
 #include "MTHUD.h"
 #include "AMTCharacter.h"
+#include "Camera/CameraComponent.h"
+#include "CanvasItem.h"
 #include "Engine/Canvas.h"
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
@@ -26,6 +28,13 @@ void AMTHUD::ShowHitMarker(bool bIsCrit)
 	const UWorld* World = GetWorld();
 	LastHitMarkerTime = World ? World->GetTimeSeconds() : 0.0f;
 	bLastHitWasCrit = bIsCrit;
+}
+
+void AMTHUD::ShowDamageDirection(const FVector& WorldDir)
+{
+	LastDamageDirWorld = WorldDir.GetSafeNormal();
+	const UWorld* World = GetWorld();
+	LastDamageDirTime = World ? World->GetTimeSeconds() : 0.0f;
 }
 
 void AMTHUD::DrawHUD()
@@ -96,6 +105,60 @@ void AMTHUD::DrawHUD()
 		Canvas->DrawItem(TR);
 		Canvas->DrawItem(BL);
 		Canvas->DrawItem(BR);
+	}
+
+	// Directional damage indicator — red wedge on the side of the screen pointing toward the attacker.
+	// Position computed from the angle between camera forward and the world-space dir-to-attacker,
+	// projected to the horizontal plane. Fades out over DamageIndicatorDuration.
+	const float DmgElapsed = Now - LastDamageDirTime;
+	if (DamageIndicatorDuration > 0.0f && DmgElapsed >= 0.0f && DmgElapsed < DamageIndicatorDuration && !LastDamageDirWorld.IsNearlyZero())
+	{
+		FRotator CamRot = FRotator::ZeroRotator;
+		FVector CamLoc = FVector::ZeroVector;
+		if (PC)
+		{
+			PC->GetPlayerViewPoint(CamLoc, CamRot);
+		}
+		FVector CamFwd = FRotationMatrix(FRotator(0.0f, CamRot.Yaw, 0.0f)).GetUnitAxis(EAxis::X);
+		FVector CamRight = FRotationMatrix(FRotator(0.0f, CamRot.Yaw, 0.0f)).GetUnitAxis(EAxis::Y);
+
+		FVector DirH = LastDamageDirWorld; DirH.Z = 0.0f; DirH.Normalize();
+		const float Fwd = FVector::DotProduct(CamFwd, DirH);    // +1 attacker in front, -1 behind
+		const float Right = FVector::DotProduct(CamRight, DirH); // +1 attacker right
+		const float AngleRad = FMath::Atan2(Right, Fwd);          // -PI..PI, 0 = front, PI/2 = right, ±PI = behind
+
+		// Fade with a steep curve (alpha² so it lingers strong then fades fast at the end).
+		const float LinearAlpha = FMath::Clamp(1.0f - DmgElapsed / DamageIndicatorDuration, 0.0f, 1.0f);
+		const float Alpha = LinearAlpha * LinearAlpha;
+
+		// Draw a curved arc of N line segments, centered on the attacker angle. Looks more like a
+		// "danger blip" than a hard triangle. Multiple parallel arcs at different radii = thick look.
+		const int32 NumSegs = 14;
+		const float ArcHalfRad = FMath::DegreesToRadians(22.0f);  // arc spans 44° total
+		const FLinearColor DmgColor(0.95f, 0.15f, 0.15f, Alpha);
+
+		auto DrawArc = [&](float Radius, float Thickness)
+		{
+			FVector2D Prev;
+			for (int32 i = 0; i <= NumSegs; ++i)
+			{
+				const float T = (float)i / (float)NumSegs;
+				const float SegAngle = AngleRad - ArcHalfRad + T * 2.0f * ArcHalfRad;
+				const FVector2D P(CX + Radius * FMath::Sin(SegAngle), CY - Radius * FMath::Cos(SegAngle));
+				if (i > 0)
+				{
+					FCanvasLineItem Seg(Prev, P);
+					Seg.SetColor(DmgColor);
+					Seg.LineThickness = Thickness;
+					Canvas->DrawItem(Seg);
+				}
+				Prev = P;
+			}
+		};
+		// Stack three arcs at slightly different radii for a "thick glow" look without needing a texture.
+		DrawArc(DamageIndicatorRadiusPx,        4.0f);
+		DrawArc(DamageIndicatorRadiusPx + 5.0f, 2.0f);
+		DrawArc(DamageIndicatorRadiusPx - 5.0f, 2.0f);
 	}
 
 	// Notifications (top-left), expire by time

@@ -101,6 +101,32 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "WeaponSway", meta = (ClampMin = "0.1"))
 	float LandingJoltDecaySpeed = 8.0f;
 
+	// === Recoil + spread ===
+
+	/** Camera pitch kick (degrees) on each shot. Pushes the view UP. No auto-recovery — player compensates. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recoil", meta = (ClampMin = "0.0"))
+	float RecoilVerticalKick = 1.2f;
+
+	/** Max camera yaw kick (degrees, ±) on each shot. Random per shot for unpredictability. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Recoil", meta = (ClampMin = "0.0"))
+	float RecoilHorizontalKick = 0.3f;
+
+	/** Base bullet spread cone half-angle (degrees) — minimum even when not firing. Higher = less accurate hipfire. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread", meta = (ClampMin = "0.0"))
+	float SpreadBaseAngleDeg = 0.5f;
+
+	/** Spread added per shot (degrees), accumulates with sustained fire up to SpreadMaxAngleDeg. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread", meta = (ClampMin = "0.0"))
+	float SpreadPerShotDeg = 0.4f;
+
+	/** Maximum spread cap (degrees). Sustained firing won't push spread past this. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread", meta = (ClampMin = "0.0"))
+	float SpreadMaxAngleDeg = 3.5f;
+
+	/** Spread recovery rate (degrees/sec) when not firing. Higher = quicker bloom-down. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Spread", meta = (ClampMin = "0.0"))
+	float SpreadRecoverDegPerSec = 4.0f;
+
 	/** Server-only. Tries to put the given weapon class into primary (if empty) then secondary. Returns true on success. */
 	bool TryEquipWeapon(TSubclassOf<AMTWeapon> NewWeaponClass);
 
@@ -198,6 +224,50 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
 	TObjectPtr<UInputAction> EmoteAction;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
+	TObjectPtr<UInputAction> LeanLeftAction;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
+	TObjectPtr<UInputAction> LeanRightAction;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
+	TObjectPtr<UInputAction> SlideAction;
+
+	// === Lean ===
+
+	/** Camera roll (degrees) at full lean — both directions. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lean", meta = (ClampMin = "0.0"))
+	float LeanRollDegrees = 12.0f;
+
+	/** Camera horizontal offset (cm) at full lean. Camera moves laterally to peek past cover. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lean", meta = (ClampMin = "0.0"))
+	float LeanLateralOffset = 25.0f;
+
+	/** How fast the lean lerps in/out. Higher = snappier. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Lean", meta = (ClampMin = "0.1"))
+	float LeanInterpSpeed = 10.0f;
+
+	// === Slide ===
+
+	/** Forward impulse magnitude applied on slide start (cm/s). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide", meta = (ClampMin = "0.0"))
+	float SlideImpulseSpeed = 1500.0f;
+
+	/** Reduced ground friction during slide (vs default ~8). Lower = slides longer. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide", meta = (ClampMin = "0.0"))
+	float SlideGroundFriction = 0.5f;
+
+	/** Max slide duration before forced exit (seconds). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide", meta = (ClampMin = "0.1"))
+	float SlideMaxDuration = 1.0f;
+
+	/** Speed (cm/s) below which the slide auto-ends. Friction decays the actual velocity. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Slide", meta = (ClampMin = "0.0"))
+	float SlideEndSpeedThreshold = 350.0f;
+
+	UPROPERTY(ReplicatedUsing = OnRep_IsSliding, BlueprintReadOnly, Category = "Slide")
+	bool bIsSliding = false;
+
 	// === Emote (Fortnite-style: triggers dance montage + switches camera to 3P for the duration) ===
 
 	/** Camera back-offset (cm) from the head while emoting — pulls view behind the character. */
@@ -234,6 +304,19 @@ protected:
 
 	void Emote();
 
+	void LeanLeftPressed();
+	void LeanLeftReleased();
+	void LeanRightPressed();
+	void LeanRightReleased();
+
+	void StartSlide();
+
+	UFUNCTION(Server, Reliable)
+	void ServerStartSlide();
+
+	UFUNCTION()
+	void OnRep_IsSliding();
+
 	UFUNCTION(Server, Reliable)
 	void ServerStartEmote();
 
@@ -261,6 +344,12 @@ protected:
 	UFUNCTION(NetMulticast, Unreliable)
 	void MulticastFireFX(FVector_NetQuantize Start, FVector_NetQuantize End, bool bHit, bool bHitTarget, bool bWasCrit);
 
+	UFUNCTION(NetMulticast, Unreliable)
+	void MulticastShowDamageNumber(FVector_NetQuantize Loc, int32 Damage, bool bWasCrit);
+
+	UFUNCTION(Client, Unreliable)
+	void ClientShowDamageDirection(FVector_NetQuantizeNormal AttackerDirWorld);
+
 	UFUNCTION()
 	void OnRep_Health();
 
@@ -286,6 +375,35 @@ protected:
 	FVector LookSwayVelocity = FVector::ZeroVector;
 	float LandingJoltCurrent = 0.0f;
 	bool bWasInAirLastFrame = false;
+
+	/** Current spread cone half-angle. Server-side: grows on fire (capped), decays toward base in Tick. */
+	float CurrentSpreadDeg = 0.0f;
+
+	// Lean: -1 (full left) to +1 (full right). Held-state inputs accumulate into LeanInput each frame.
+	// LeanInputTarget is replicated so remote clients can drive a spine-bend in their ABP for TPP lean.
+	// Owner client sends discrete -1/0/+1 to server via ServerSetLeanInput; server DOREPLIFETIMEs to others.
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Lean")
+	float LeanInputTarget = 0.0f;
+
+	/** Smoothed lean value (-1..+1) — local per-instance Tick interpolation toward LeanInputTarget.
+	 *  ABP reads this to drive spine-bone roll for TPP body lean. */
+	UPROPERTY(BlueprintReadOnly, Category = "Lean")
+	float LeanCurrent = 0.0f;
+
+	bool bLeanLeftHeld = false;
+	bool bLeanRightHeld = false;
+
+	UFUNCTION(Server, Unreliable)
+	void ServerSetLeanInput(float NewTarget);
+
+	/** Helper: sets local LeanInputTarget and forwards to server (so it replicates to other clients). */
+	void ApplyLeanInputChange(float NewTarget);
+
+	// Slide state
+	float SlideStartTime = -1.0f;
+	float PreSlideGroundFriction = 8.0f;
+	float PreSlideBrakingDecel = 2048.0f;
+	void EndSlide();
 
 	/** Refresh BlueprintReadOnly anim-state vars (Speed, ForwardSpeed, AimPitch, bIsInAir, etc.). Runs on all instances. */
 	void UpdateAnimationState();

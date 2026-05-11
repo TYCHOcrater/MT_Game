@@ -42,6 +42,16 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD|HitMarker")
 	float HitMarkerDuration = 0.15f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD|DamageNumbers")
+	bool bShowDamageNumbers = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD|DamageIndicator")
+	float DamageIndicatorDuration = 1.2f;
+
+	/** Radius (px) from screen center where the damage arc is drawn. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "HUD|DamageIndicator")
+	float DamageIndicatorRadiusPx = 220.0f;
+
 	UFUNCTION(BlueprintCallable, Category = "HUD")
 	void ToggleHUD() { bShowMTHUD = !bShowMTHUD; }
 
@@ -51,6 +61,9 @@ public:
 
 	void ShowHitMarker(bool bIsCrit = false);
 
+	/** Called by AMTCharacter::ClientShowDamageDirection. WorldDir points FROM victim TOWARD attacker. */
+	void ShowDamageDirection(const FVector& WorldDir);
+
 	virtual void DrawHUD() override;
 
 protected:
@@ -58,4 +71,7 @@ protected:
 	TArray<FMTKillEvent> KillFeed;
 	float LastHitMarkerTime = -1000.0f;
 	bool bLastHitWasCrit = false;
+
+	FVector LastDamageDirWorld = FVector::ZeroVector;
+	float LastDamageDirTime = -1000.0f;
 };
